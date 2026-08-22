@@ -1,0 +1,21 @@
+{
+  "name": "3V3 rail bring-up",
+  "device": "sim://psu?channels=2&load=8",
+  "stop_on_fail": true,
+  "safe_shutdown": true,
+  "steps": [
+    {"op": "log", "message": "bring up the 3V3 rail into an 8 ohm load"},
+    {"op": "reset"},
+    {"op": "load", "channel": 1, "ohms": 8},
+    {"op": "set", "name": "rail limits", "channel": 1,
+     "voltage": 3.3, "current": 0.6, "ovp": 3.8, "ocp": 0.8},
+    {"op": "output", "channel": 1, "state": "on"},
+    {"op": "wait", "seconds": 0.2},
+    {"op": "check", "name": "rail in regulation", "channel": 1,
+     "voltage": {"nominal": 3.3, "tolerance_pct": 2},
+     "current": {"max": 0.5},
+     "mode": "CV"},
+    {"op": "measure", "channel": 1},
+    {"op": "output", "channel": 1, "state": "off"}
+  ]
+}
