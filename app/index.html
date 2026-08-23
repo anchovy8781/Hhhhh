@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0d1117" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext y='26' font-size='26'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E"
+    />
+    <title>전력기기 랩</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">⚡</span>
+          <div>
+            <h1>전력기기 랩</h1>
+            <p id="tagline">재료를 고르고 슬라이더를 움직이면 바로 계산됩니다</p>
+          </div>
+        </div>
+        <nav id="device-tabs" class="device-tabs" aria-label="장치 선택"></nav>
+      </header>
+
+      <main class="workspace">
+        <section class="viewport">
+          <canvas id="canvas"></canvas>
+          <div id="viewport-badges" class="viewport-badges"></div>
+          <button id="cutaway" class="cutaway" type="button" aria-pressed="false">
+            단면 보기
+          </button>
+          <div class="viewport-hint">한 손가락: 회전 · 두 손가락: 확대/이동</div>
+        </section>
+
+        <section class="panel">
+          <div id="headline" class="headline"></div>
+          <div id="warnings" class="warnings"></div>
+
+          <div class="group-tabs" id="group-tabs" role="tablist"></div>
+          <div id="controls" class="controls"></div>
+
+          <details class="extras" id="curve-box">
+            <summary>특성 곡선</summary>
+            <div id="curves"></div>
+          </details>
+
+          <details class="extras">
+            <summary>모든 계산값</summary>
+            <div id="all-metrics" class="metric-table"></div>
+          </details>
+
+          <details class="extras">
+            <summary>프리셋 불러오기</summary>
+            <div id="presets" class="presets"></div>
+          </details>
+
+          <button id="reset" class="reset">기본값으로 되돌리기</button>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

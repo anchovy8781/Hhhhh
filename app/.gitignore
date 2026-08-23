@@ -1,0 +1,20 @@
+node_modules/
+dist/
+screenshots/
+.vite/
+
+# Capacitor copies the built web app into the native project at sync time.
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/app/src/main/res/xml/config.xml
+
+# Gradle / Android build output
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+*.apk
+*.aab
+*.keystore

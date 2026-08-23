@@ -1,4 +1,20 @@
-# powerdev
+# Hhhhh
+
+전력기기(power device)를 다루는 두 가지 도구가 들어 있습니다.
+
+| 디렉터리 | 무엇인가 | 대상 |
+| --- | --- | --- |
+| [`app/`](app/) | **전력기기 랩** — 재료를 골라 인덕터·변압기·솔레노이드·DC 모터를 3D로 설계하는 안드로이드 앱 (APK) | 설계·학습 |
+| [`powerdev/`](#powerdev) | SCPI 전원장치(파워서플라이·전자부하)를 제어하는 파이썬 CLI/라이브러리 | 계측·시험 자동화 |
+
+앞의 것은 **기기를 설계**하고, 뒤의 것은 **실제 장비를 구동**합니다.
+APK를 받는 방법을 포함한 앱 설명은 [`app/README.md`](app/README.md)에 있습니다.
+
+---
+
+<a id="powerdev"></a>
+
+## powerdev
 
 A developer tool for programmable power devices — bench supplies and anything
 else that speaks SCPI over serial, TCP, or the built-in simulator.

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">전력기기 랩</string>
+    <string name="title_activity_main">전력기기 랩</string>
+    <string name="package_name">com.jeonryeoklab.app</string>
+    <string name="custom_url_scheme">com.jeonryeoklab.app</string>
+</resources>

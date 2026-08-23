@@ -1,0 +1,77 @@
+name: Android APK
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "app/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  build:
+    name: 테스트 후 APK 빌드
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: 타입 검사
+        run: npm run typecheck
+
+      - name: 물리 엔진 단위 테스트
+        run: npm test
+
+      - name: 웹 앱 빌드
+        run: npm run build
+
+      - name: 브라우저 스모크 테스트
+        run: |
+          npx playwright install --with-deps chromium
+          node tools/smoke.mjs
+        env:
+          # tools/smoke.mjs pins the container's browser path; on a runner the
+          # freshly installed one is the right choice.
+          PLAYWRIGHT_BROWSER_PATH: default
+
+      - name: 스크린샷 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: app/screenshots/
+          if-no-files-found: ignore
+
+      - name: 네이티브 프로젝트 동기화
+        run: npx cap sync android
+
+      - name: 디버그 APK 빌드
+        run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: APK 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: jeonryeok-lab-debug-apk
+          path: app/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
