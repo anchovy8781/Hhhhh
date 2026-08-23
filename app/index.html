@@ -23,6 +23,9 @@
             <p id="tagline">재료를 고르고 슬라이더를 움직이면 바로 계산됩니다</p>
           </div>
         </div>
+        <button id="beginner" class="beginner" type="button" aria-pressed="true">
+          초보자 모드
+        </button>
         <nav id="device-tabs" class="device-tabs" aria-label="장치 선택"></nav>
       </header>
 
@@ -33,11 +36,30 @@
           <button id="cutaway" class="cutaway" type="button" aria-pressed="false">
             단면 보기
           </button>
+          <div id="timelapse" class="timelapse" hidden>
+            <div class="tl-bar"><div id="tl-fill" class="tl-fill"></div></div>
+            <div id="tl-readout" class="tl-readout"></div>
+          </div>
           <div class="viewport-hint">한 손가락: 회전 · 두 손가락: 확대/이동</div>
         </section>
 
         <section class="panel">
+          <div id="guide" class="guide"></div>
+          <div id="advice" class="advice" hidden></div>
           <div id="headline" class="headline"></div>
+          <div class="run-setup">
+            <label class="run-duration">
+              운전 시간
+              <select id="run-duration">
+                <option value="60">1분</option>
+                <option value="600">10분</option>
+                <option value="1800" selected>30분</option>
+                <option value="7200">2시간</option>
+                <option value="28800">8시간</option>
+                <option value="86400">24시간 연속</option>
+              </select>
+            </label>
+          </div>
           <button id="energise" class="energise" type="button">
             ⚡ 전원 인가하고 돌려보기
           </button>

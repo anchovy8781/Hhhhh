@@ -15,6 +15,7 @@ import {
   skinDepth,
 } from "../src/physics/wire";
 import {
+  coreFieldStrength,
   coreMetrics,
   effectivePermeability,
   fluxDensity,
@@ -127,12 +128,25 @@ describe("magnetic circuit", () => {
     expect(mue).toBeLessThan(200);
   });
 
-  it("never lets flux density exceed saturation", () => {
+  it("keeps going past saturation at the slope of air", () => {
     const material = coreMaterial("ferrite-n87");
     const metrics = coreMetrics(TOROID, material);
     const b = fluxDensity(material, metrics, 0, 100 * 50); // absurd drive
-    expect(b).toBeLessThanOrEqual(material.bsat);
-    expect(b).toBeGreaterThan(material.bsat * 0.99);
+    // Every domain is already aligned, so the core is now just vacuum: B keeps
+    // climbing, but at mu0 rather than mu0*mur.
+    expect(b).toBeGreaterThan(material.bsat);
+    const unsaturated = (MU0 * material.mur * 100 * 50) / metrics.le;
+    expect(b).toBeLessThan(unsaturated / 100);
+  });
+
+  it("adds exactly the free-space slope once fully saturated", () => {
+    const material = coreMaterial("ferrite-n87");
+    const above = material.bsat * 1.2;
+    const higher = material.bsat * 1.3;
+    const slope =
+      (higher - above) /
+      (coreFieldStrength(material, higher) - coreFieldStrength(material, above));
+    expect(slope).toBeCloseTo(MU0, 9);
   });
 
   it("stays linear well below the knee", () => {

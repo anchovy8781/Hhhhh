@@ -159,6 +159,7 @@ export function environmentParams(): Param[] {
       default: DEFAULT_ENVIRONMENT.altitude,
       group: "환경",
       hint: "공기가 얇아지면 대류 냉각이 약해집니다. 3000m에서 약 15% 손해입니다.",
+      advanced: true,
     },
     {
       kind: "number",
@@ -183,6 +184,7 @@ export function environmentParams(): Param[] {
       default: DEFAULT_ENVIRONMENT.emissivity,
       group: "환경",
       hint: "광택 금속은 0.1, 검게 도장한 면은 0.95. 복사 방열이 몇 배 달라집니다.",
+      advanced: true,
     },
     {
       kind: "number",
@@ -195,6 +197,7 @@ export function environmentParams(): Param[] {
       default: DEFAULT_ENVIRONMENT.humidity,
       group: "환경",
       hint: "높은 습도는 절연 열화와 부식을 앞당깁니다.",
+      advanced: true,
     },
   ];
 }

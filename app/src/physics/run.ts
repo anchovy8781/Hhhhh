@@ -38,9 +38,30 @@ export interface PartSpec {
   advice: string;
 }
 
+/**
+ * What an AC-excited magnetic device needs to simulate its own energisation.
+ *
+ * A transformer never reaches the DC steady state of its winding resistance:
+ * the current is set by the magnetising reactance, and the first half cycle
+ * can drive the core to twice its normal flux plus whatever remanence was left
+ * behind. That is the inrush, and it is invisible to an R-L step model.
+ */
+export interface AcMagnetics {
+  turns: number;
+  /** Effective core area [m²]. */
+  area: number;
+  /** Inverse B-H curve: magnetomotive force needed for a flux density [A·T]. */
+  mmfFor: (b: number) => number;
+  bsat: number;
+  /** Flux left in the core from last time, as a fraction of Bsat. */
+  remanence: number;
+  /** Peak of the load current reflected into this winding [A]. */
+  loadPeak: number;
+}
+
 export interface RuntimeSpec {
-  /** `rl` covers inductors, transformers and solenoids; `motor` adds inertia. */
-  kind: "rl" | "motor";
+  /** `rl` covers inductors and solenoids; `motor` adds inertia; `ac` excites. */
+  kind: "rl" | "motor" | "ac";
   /**
    * How the device is fed.
    *
@@ -73,6 +94,9 @@ export interface RuntimeSpec {
   loadTorque?: number;
   /** Series voltage drop that does not scale with current (brushes). */
   seriesDrop?: number;
+  /** Line frequency, for AC devices [Hz]. */
+  frequency?: number;
+  ac?: AcMagnetics;
 }
 
 export interface ElectricalSample {
@@ -166,6 +190,8 @@ function runElectrical(spec: RuntimeSpec): {
   peak: number;
   steady: number;
   rise: number;
+  peakFlux?: number;
+  peakFluxAt?: number;
 } {
   const resistance = Math.max(spec.resistance20, 1e-9);
   const drive = Math.max(spec.supply - (spec.seriesDrop ?? 0), 0);
@@ -199,6 +225,10 @@ function runElectrical(spec: RuntimeSpec): {
     return { samples, peak, steady, rise };
   }
 
+  if (spec.kind === "ac" && spec.ac) {
+    return runAcInrush(spec, spec.ac, drive, resistance, inductance);
+  }
+
   if (spec.drive === "current") {
     // The converter ramps the current at dI/dt = V/L and then holds it.
     const rated = spec.ratedCurrent ?? drive / resistance;
@@ -229,6 +259,87 @@ function runElectrical(spec: RuntimeSpec): {
 }
 
 /**
+ * Magnetising inrush.
+ *
+ * The state variable is flux linkage, integrated straight from Faraday's law:
+ * `dλ/dt = v(t) − i·R`. The current comes back out of the saturating B-H curve
+ * rather than from a fixed inductance, which is the whole point -- once the
+ * core is past its knee the winding is little more than a resistor, and that
+ * is what produces the tens-of-amps first peak on a transformer that draws
+ * milliamps once it settles.
+ *
+ * Worst case switching is assumed: the supply is closed at a voltage zero
+ * crossing, when the flux excursion is largest.
+ */
+function runAcInrush(
+  spec: RuntimeSpec,
+  ac: AcMagnetics,
+  peakVoltage: number,
+  resistance: number,
+  inductance: number,
+): {
+  samples: ElectricalSample[];
+  peak: number;
+  steady: number;
+  rise: number;
+  peakFlux: number;
+  peakFluxAt: number;
+} {
+  const frequency = spec.frequency ?? 60;
+  const omega = 2 * Math.PI * frequency;
+  // Run long enough for the inrush to decay: three L/R time constants, but at
+  // least a dozen cycles and never more than can be integrated quickly.
+  const decayTime = inductance / Math.max(resistance, 1e-9);
+  const cycles = Math.min(Math.max(Math.ceil(3 * decayTime * frequency), 12), 240);
+  const perCycle = 720;
+  const dt = 1 / (frequency * perCycle);
+  const amplitude = peakVoltage * Math.SQRT2;
+  // Residual flux adds to the first excursion, which is why a transformer
+  // switched back on quickly draws more than one switched on cold.
+  let flux = ac.remanence * ac.bsat * ac.area * ac.turns;
+  const samples: ElectricalSample[] = [];
+  let peak = 0;
+  let peakFlux = 0;
+  let peakFluxAt = 0;
+  const every = Math.max(1, Math.floor((cycles * perCycle) / 500));
+  let lastCycleRms = 0;
+  let sumSquares = 0;
+  let countInCycle = 0;
+
+  for (let step = 0; step < cycles * perCycle; step++) {
+    const t = step * dt;
+    const b = flux / (ac.turns * ac.area);
+    if (Math.abs(b) > peakFlux) {
+      peakFlux = Math.abs(b);
+      peakFluxAt = t;
+    }
+    const magnetising = ac.mmfFor(Math.abs(b)) / ac.turns * Math.sign(b || 1);
+    const current = magnetising + ac.loadPeak * Math.sin(omega * t);
+    peak = Math.max(peak, Math.abs(current));
+    flux += (amplitude * Math.sin(omega * t) - current * resistance) * dt;
+
+    sumSquares += current * current;
+    countInCycle++;
+    if (countInCycle === perCycle) {
+      lastCycleRms = Math.sqrt(sumSquares / countInCycle);
+      sumSquares = 0;
+      countInCycle = 0;
+    }
+    if (step % every === 0) samples.push({ t, current });
+  }
+  // Settled rms, taken from the final complete cycle.
+  const steady = lastCycleRms;
+  return {
+    samples,
+    peak,
+    steady,
+    rise: Math.min(decayTime, cycles / frequency),
+    peakFlux,
+    peakFluxAt,
+  };
+}
+
+/**
  * Phase 2: the thermal run.
  *
  * Every part is a lumped mass relaxing toward the temperature the steady-state
@@ -254,6 +365,24 @@ export function runDevice(
   let failedAt: number | undefined;
   let failedPart: PartId | undefined;
 
+  if (
+    spec.kind === "ac" &&
+    spec.ac &&
+    electrical.peakFlux !== undefined &&
+    electrical.peakFlux > spec.ac.bsat
+  ) {
+    events.push({
+      t: electrical.peakFluxAt ?? 0,
+      partId: "core",
+      // Inrush is a warning, never a failure: nothing is destroyed by it. It
+      // decides breaker and fuse selection, so it has to be said out loud.
+      level: "warn",
+      title: "투입 돌입 (코어 포화)",
+      text: `투입 순간 자속이 ${electrical.peakFlux.toFixed(2)} T까지 올라 포화점 ${spec.ac.bsat} T를 넘었고, 첫 피크 전류가 ${electrical.peak.toFixed(1)} A — 정상 운전 전류의 ${(electrical.peak / Math.max(spec.ratedCurrent ?? 1, 1e-6)).toFixed(0)}배에 달했습니다. 잔류 자속이 남은 상태에서 전압 0점에 투입하는 최악 조건 기준입니다.`,
+      advice: "돌입 억제 저항이나 소프트 스타트를 넣고, 차단기는 순시 트립 여유를 두고 고르세요.",
+    });
+  }
+
   if (spec.saturationCurrent !== undefined && electrical.peak > spec.saturationCurrent) {
     events.push({
       t: electrical.samples.find((s) => s.current > spec.saturationCurrent!)?.t ?? 0,
@@ -277,7 +406,7 @@ export function runDevice(
       spec.resistance20 * (1 + spec.alphaT * (windingTemp - 20));
     const drive = Math.max(spec.supply - (spec.seriesDrop ?? 0), 0);
     const current =
-      spec.drive === "current"
+      spec.drive === "current" || spec.kind === "ac"
         ? (spec.ratedCurrent ?? electrical.steady)
         : spec.kind === "motor"
           ? Math.max(0, electrical.steady * (spec.resistance20 / resistance))

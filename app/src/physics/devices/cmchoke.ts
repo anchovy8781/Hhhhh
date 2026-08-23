@@ -3,6 +3,13 @@
 import { coreLossDensity, coreMaterial, conductorMaterial } from "../materials";
 import { coreMetrics, inductanceAtZero, operatingPoint, saturationCurrent } from "../magnetics";
 import { environmentParams, readEnvironment } from "../environment";
+import {
+  currentDensity,
+  meaningful,
+  recommendAwg,
+  wireReason,
+  type Recommendation,
+} from "../recommend";
 import { solveThermal } from "../thermal";
 import { analyzeWinding } from "../wire";
 import type { RuntimeSpec } from "../run";
@@ -59,12 +66,60 @@ export const cmChoke: DeviceDefinition = {
     },
     insulationClassParam(),
     { kind: "number", key: "lineCurrent", label: "선로 전류 (차동)", unit: "A", min: 0.1, max: 200, step: 0.1, default: 10, group: "운전" },
-    { kind: "number", key: "voltage", label: "선로 전압", unit: "V", min: 12, max: 1000, step: 1, default: 230, group: "운전" },
-    { kind: "number", key: "freq", label: "노이즈 주파수", unit: "Hz", min: 1e3, max: 30e6, step: 1, default: 1e6, group: "운전", log: true },
+    { kind: "number", key: "voltage", label: "선로 전압", unit: "V", min: 12, max: 1000, step: 1, default: 230, group: "운전", advanced: true },
+    { kind: "number", key: "lineFreq", label: "선로 주파수", unit: "Hz", min: 16, max: 400, step: 1, default: 60, group: "운전", hint: "선로 전류가 흐르는 주파수. 코어 손실은 여기서 발생합니다.", advanced: true },
+    { kind: "number", key: "freq", label: "노이즈 주파수", unit: "Hz", min: 1e3, max: 30e6, step: 1, default: 1e6, group: "운전", log: true, hint: "임피던스와 감쇠를 평가할 주파수입니다. 이 주파수의 전류는 걸러내는 대상이지 흐르는 전류가 아닙니다." },
+    { kind: "number", key: "targetZ", label: "목표 임피던스", unit: "Ω", min: 100, max: 1e6, step: 10, default: 20e3, group: "운전", log: true, hint: "노이즈 주파수에서 이만큼의 임피던스가 나오도록 턴수를 추천합니다." },
     ...environmentParams(),
   ],
   simulate,
+  recommend,
 };
+
+/** Turns for a target common-mode impedance, and wire for the line current. */
+function recommend(values: ParamValues): Recommendation[] {
+  const core = coreMaterial(str(values, "coreMaterial"));
+  const od = num(values, "od");
+  const innerDiameter = Math.min(num(values, "id"), od - 2);
+  const metrics = coreMetrics(toroidDims(od, innerDiameter, num(values, "height")), core);
+  const turns = Math.round(num(values, "turns"));
+  const targetZ = num(values, "targetZ");
+  const freq = num(values, "freq");
+  const lineCurrent = num(values, "lineCurrent");
+  const out: Recommendation[] = [];
+
+  const alPerTurn = inductanceAtZero(core, metrics, 0, 1);
+  const neededL = targetZ / (2 * Math.PI * freq);
+  const suggested = Math.max(2, Math.round(Math.sqrt(neededL / Math.max(alPerTurn, 1e-18))));
+  if (meaningful(turns, suggested, 0.05)) {
+    out.push({
+      key: "turns",
+      value: suggested,
+      label: `권선당 턴수 ${turns} → ${suggested}`,
+      reason: `${(freq / 1e6).toFixed(2)}MHz에서 ${(targetZ / 1e3).toFixed(1)}kΩ을 내려면 L = Z/(2πf) = ${si(neededL, "H")}가 필요하고, 인덕턴스는 턴수의 제곱에 비례합니다.`,
+    });
+  }
+
+  const density = currentDensity(lineCurrent * num(values, "voltage"));
+  const awg = recommendAwg(lineCurrent, density);
+  if (Math.abs(awg - Math.round(num(values, "awg"))) >= 1) {
+    out.push({
+      key: "awg",
+      value: awg,
+      label: `전선 AWG${Math.round(num(values, "awg"))} → AWG${awg}`,
+      reason: wireReason(awg, lineCurrent, density),
+    });
+  }
+  if (core.mur < 10000) {
+    out.push({
+      key: "coreMaterial",
+      value: "nanocrystalline-vitroperm",
+      label: "코어 재료 → 나노결정 VITROPERM 500F",
+      reason: `커먼모드 초크는 투자율이 곧 임피던스입니다. µr ${core.mur.toLocaleString()} → 60,000으로 바꾸면 같은 턴수로 훨씬 큰 감쇠를 얻습니다.`,
+    });
+  }
+  return out;
+}
 
 function simulate(values: ParamValues): DeviceResult {
   const environment = readEnvironment(values);
@@ -80,6 +135,7 @@ function simulate(values: ParamValues): DeviceResult {
   const lineCurrent = num(values, "lineCurrent");
   const voltage = num(values, "voltage");
   const freq = num(values, "freq");
+  const lineFreq = num(values, "lineFreq");
 
   const dims = toroidDims(od, innerDiameter, height);
   const metrics = coreMetrics(dims, core);
@@ -96,6 +152,12 @@ function simulate(values: ParamValues): DeviceResult {
   const dmOperating = operatingPoint(core, metrics, 0, turns, lineCurrent * leakageFraction);
   const isat = saturationCurrent(core, metrics, 0, turns) / Math.max(leakageFraction, 1e-3);
 
+  // Core loss comes from the leakage flux swinging at the *line* frequency.
+  // Evaluating it at the noise frequency was wrong twice over: that current is
+  // the thing being filtered out, not a current the winding carries, and it
+  // extrapolates the Steinmetz fit far past where the material was measured.
+  const coreLoss = coreLossDensity(core, lineFreq, dmOperating.b) * metrics.ve;
+
   const lossAt = (tempC: number) => {
     const winding = analyzeWinding({
       material: conductor,
@@ -103,11 +165,11 @@ function simulate(values: ParamValues): DeviceResult {
       awg,
       meanTurnLength: metrics.mlt,
       windowHeight: metrics.windowHeight,
-      freq: 0,
+      freq: lineFreq,
       tempC,
     });
-    // Two windings, each carrying the line current.
-    return 2 * winding.rdc * lineCurrent * lineCurrent;
+    // Two windings, each carrying the line current, plus the core.
+    return 2 * winding.rac * lineCurrent * lineCurrent + coreLoss;
   };
 
   const thermal = solveThermal(lossAt, metrics.surface, environment);
@@ -117,14 +179,13 @@ function simulate(values: ParamValues): DeviceResult {
     awg,
     meanTurnLength: metrics.mlt,
     windowHeight: metrics.windowHeight,
-    freq: 0,
+    freq: lineFreq,
     tempC: thermal.temperature,
   });
-  const copperLoss = 2 * winding.rdc * lineCurrent * lineCurrent;
-  const coreLoss = coreLossDensity(core, freq, dmOperating.b) * metrics.ve;
+  const copperLoss = 2 * winding.rac * lineCurrent * lineCurrent;
   const occupied = winding.occupiedArea * 2;
   const fill = occupied / metrics.aw;
-  const drop = lineCurrent * winding.rdc;
+  const drop = lineCurrent * winding.rac;
 
   /** Insertion loss into a 50 Ω system, the way EMI filters are specified. */
   const insertionLoss = (impedance: number) =>
@@ -146,7 +207,7 @@ function simulate(values: ParamValues): DeviceResult {
     metric("isat", "차동 포화 전류", isat, si(isat, "A"),
       lineCurrent > isat ? "bad" : lineCurrent > isat * 0.8 ? "warn" : "good"),
     metric("bdm", "차동 자속밀도", dmOperating.b, `${dmOperating.b.toFixed(4)} T`),
-    metric("rdc", "권선 저항 (1개)", winding.rdc, si(winding.rdc, "Ω")),
+    metric("rdc", "권선 저항 (1개)", winding.rac, si(winding.rac, "Ω")),
     metric("drop", "선로 전압 강하", drop, si(drop, "V")),
     metric("pcu", "구리손", copperLoss, si(copperLoss, "W")),
     metric("pfe", "철손", coreLoss, si(coreLoss, "W")),

@@ -11,7 +11,7 @@
 import { MU0, bisect, clamp } from "./constants";
 import type { CoreMaterial } from "./materials";
 
-export type CoreShape = "toroid" | "ei";
+export type CoreShape = "toroid" | "ei" | "pot" | "etd" | "rod";
 
 export interface ToroidDims {
   shape: "toroid";
@@ -28,7 +28,31 @@ export interface EiDims {
   windowHeight: number; // 창 높이 d [m]
 }
 
-export type CoreDims = ToroidDims | EiDims;
+/** Pot / RM core: a round centre post inside a closed shell. */
+export interface PotDims {
+  shape: "pot";
+  outerDiameter: number; // [m]
+  height: number; // [m]
+  legDiameter: number; // [m]
+}
+
+/** ETD: an E core whose centre leg is round, so the winding is shorter. */
+export interface EtdDims {
+  shape: "etd";
+  legDiameter: number; // [m]
+  depth: number; // [m]
+  windowWidth: number; // [m]
+  windowHeight: number; // [m]
+}
+
+/** A plain rod: an open magnetic circuit, dominated by its own demagnetisation. */
+export interface RodDims {
+  shape: "rod";
+  diameter: number; // [m]
+  length: number; // [m]
+}
+
+export type CoreDims = ToroidDims | EiDims | PotDims | EtdDims | RodDims;
 
 export interface CoreMetrics {
   ae: number; // 실효 단면적 [m²]
@@ -39,6 +63,27 @@ export interface CoreMetrics {
   mass: number; // [kg]
   surface: number; // 방열 표면적 [m²]
   windowHeight: number; // 층당 권선 높이 [m]
+  /**
+   * Gap the geometry has whether you wanted one or not [m].
+   *
+   * An open shape like a rod has no return path, and the flux has to cross the
+   * air outside it. Expressing that as an equivalent gap lets one solver
+   * handle closed and open cores alike.
+   */
+  intrinsicGap: number;
+}
+
+/**
+ * Demagnetising factor of a cylinder, from its aspect ratio.
+ *
+ * This is why a rod core with a permeability of two thousand behaves like one
+ * of a hundred: almost all of the magnetomotive force is spent pushing flux
+ * through the air outside the rod, not through the iron.
+ */
+export function demagnetisingFactor(length: number, diameter: number): number {
+  const m = Math.max(length / diameter, 1.001);
+  const root = Math.sqrt(m * m - 1);
+  return (1 / (m * m - 1)) * ((m / root) * Math.log(m + root) - 1);
 }
 
 /** Geometry of a core, reduced to the handful of numbers the physics needs. */
@@ -63,6 +108,74 @@ export function coreMetrics(dims: CoreDims, material: CoreMaterial): CoreMetrics
       mass: ve * material.density,
       surface: Math.max(surface, 1e-6),
       windowHeight: Math.max(1e-4, id * 0.9),
+      intrinsicGap: 0,
+    };
+  }
+
+  if (dims.shape === "pot") {
+    const { outerDiameter, height, legDiameter } = dims;
+    const wall = outerDiameter * 0.12;
+    const outerWindow = outerDiameter / 2 - wall;
+    const windowHeight = Math.max(1e-4, height - 2 * wall);
+    const windowWidth = Math.max(1e-4, outerWindow - legDiameter / 2);
+    const ae = (Math.PI * legDiameter * legDiameter) / 4;
+    // Up the post, out along the top plate, down the shell, back along the base.
+    const le = 2 * windowHeight + 2 * windowWidth;
+    const mlt = Math.PI * (legDiameter + windowWidth);
+    const ve = ae * le;
+    return {
+      ae,
+      le,
+      aw: windowWidth * windowHeight,
+      mlt,
+      ve,
+      mass: ve * material.density * 1.6, // the shell is not on the flux path but is still iron
+      surface: Math.PI * outerDiameter * height + (Math.PI / 2) * outerDiameter * outerDiameter,
+      windowHeight,
+      intrinsicGap: 0,
+    };
+  }
+
+  if (dims.shape === "etd") {
+    const { legDiameter, depth, windowWidth, windowHeight } = dims;
+    const ae = (Math.PI * legDiameter * legDiameter) / 4;
+    const le = 2 * (windowHeight + windowWidth + legDiameter);
+    // A round centre leg is the point of an ETD: the shortest turn for a given area.
+    const mlt = Math.PI * legDiameter + 2 * windowWidth;
+    const ve = ae * le;
+    const outer = legDiameter + 2 * windowWidth + legDiameter;
+    const tall = windowHeight + legDiameter;
+    return {
+      ae,
+      le,
+      aw: windowWidth * windowHeight * 2,
+      mlt,
+      ve,
+      mass: ve * material.density,
+      surface: 2 * (outer * tall + outer * depth + tall * depth),
+      windowHeight,
+      intrinsicGap: 0,
+    };
+  }
+
+  if (dims.shape === "rod") {
+    const { diameter, length } = dims;
+    const ae = (Math.PI * diameter * diameter) / 4;
+    const nd = demagnetisingFactor(length, diameter);
+    // Effective permeability mu_e = mu_r / (1 + Nd*(mu_r - 1)). Turn that into
+    // the gap that would produce the same reluctance.
+    const mue = material.mur / (1 + nd * (material.mur - 1));
+    const intrinsicGap = Math.max(0, length * (1 / mue - 1 / material.mur));
+    return {
+      ae,
+      le: length,
+      aw: Math.PI * diameter * length, // the winding lives on the outside
+      mlt: Math.PI * diameter * 1.3,
+      ve: ae * length,
+      mass: ae * length * material.density,
+      surface: Math.PI * diameter * length + (Math.PI / 2) * diameter * diameter,
+      windowHeight: length,
+      intrinsicGap,
     };
   }
   const { tongue, stack, windowWidth, windowHeight } = dims;
@@ -85,23 +198,44 @@ export function coreMetrics(dims: CoreDims, material: CoreMaterial): CoreMetrics
     mass: ve * material.density,
     surface: Math.max(surface, 1e-6),
     windowHeight: Math.max(1e-4, windowHeight),
+    intrinsicGap: 0,
   };
 }
 
 /**
+ * Flux density past which the core behaves as air.
+ *
+ * Beyond this fraction of saturation every domain is aligned, so the only
+ * thing left to magnetise is the vacuum: the incremental permeability is mu0,
+ * not zero.
+ */
+const FULLY_SATURATED = 0.98;
+
+/**
  * Magnetic field strength in the core for a given flux density [A/m].
  *
- * `H(B) = B / (mu0*mur) / (1 - (B/Bsat)^n)`, so the incremental permeability
- * falls off as `1 - (B/Bsat)^n`. The exponent `n` is the material's knee
- * sharpness: laminated steel and ferrite hold their permeability almost to
- * saturation and then collapse, powder cores give it up gradually.
+ * Below the knee, `H(B) = B / (mu0*mur) / (1 - (B/Bsat)^n)`, so the
+ * incremental permeability falls off as `1 - (B/Bsat)^n`. The exponent `n` is
+ * the material's knee sharpness: laminated steel and ferrite hold their
+ * permeability almost to saturation and then collapse, powder cores give it up
+ * gradually.
+ *
+ * Above `FULLY_SATURATED` the curve continues with the slope of free space.
+ * Letting H run to infinity at Bsat instead is not just a numerical nuisance:
+ * it made a saturated transformer look infinitely reluctant, and predicted an
+ * inrush of eighteen thousand amps where a real one draws tens.
  */
 export function coreFieldStrength(material: CoreMaterial, b: number): number {
   if (!isFinite(material.bsat)) return b / MU0; // 공심
   const sign = b < 0 ? -1 : 1;
-  const ratio = clamp(Math.abs(b) / material.bsat, 0, 0.999999);
-  const linear = Math.abs(b) / (MU0 * material.mur);
-  return sign * (linear / (1 - Math.pow(ratio, material.knee)));
+  const magnitude = Math.abs(b);
+  const kneeField = (value: number) => {
+    const ratio = clamp(value / material.bsat, 0, 0.999999);
+    return value / (MU0 * material.mur) / (1 - Math.pow(ratio, material.knee));
+  };
+  const limit = material.bsat * FULLY_SATURATED;
+  if (magnitude <= limit) return sign * kneeField(magnitude);
+  return sign * (kneeField(limit) + (magnitude - limit) / MU0);
 }
 
 /** Relative incremental permeability `mu_inc / mu_i` at a flux density. */
@@ -132,9 +266,12 @@ export function fluxDensity(
   if (!isFinite(material.bsat)) {
     return (MU0 * mmf) / (metrics.le + gap);
   }
-  const ceiling = material.bsat * 0.999999;
-  const maxMmf = mmfFor(material, ceiling, metrics, gap);
-  if (mmf >= maxMmf) return ceiling;
+  // The curve keeps rising past saturation at the slope of air, so the search
+  // needs headroom above Bsat rather than a ceiling at it.
+  let ceiling = material.bsat;
+  while (mmfFor(material, ceiling, metrics, gap) < mmf && ceiling < material.bsat * 1e4) {
+    ceiling *= 2;
+  }
   return bisect((b) => mmfFor(material, b, metrics, gap), mmf, 0, ceiling);
 }
 
@@ -223,8 +360,7 @@ export function currentForFluxDensity(
     return (b * (metrics.le + gap)) / (MU0 * turns);
   }
   const fringe = fringingFactor(metrics, gap);
-  const target = Math.min(b / fringe, material.bsat * 0.999999);
-  return mmfFor(material, target, metrics, gap) / turns;
+  return mmfFor(material, b / fringe, metrics, gap) / turns;
 }
 
 /**

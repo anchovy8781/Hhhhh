@@ -214,7 +214,93 @@ try {
   if (verdictState !== "fail") {
     failures.push(`과부하 설계의 판정이 fail이 아닙니다 (${verdictState})`);
   }
+  // The timelapse must actually play and set the thing on fire.
+  await wait(2500);
+  const effects = await page.evaluate(() => window.__lab.effectCount());
+  if (!(effects > 0)) {
+    failures.push("고장이 났는데 연기·불꽃 효과가 하나도 없습니다");
+  }
+  const progress = await page.evaluate(() =>
+    Number(document.getElementById("tl-fill").style.width.replace("%", "")),
+  );
+  if (!(progress > 5)) failures.push(`타임랩스가 진행되지 않았습니다 (${progress}%)`);
   await page.screenshot({ path: `${OUT}/run-failure.png` });
+  await wait(6000);
+  await page.screenshot({ path: `${OUT}/run-fire.png` });
+
+  // A 24-hour run must be selectable and must change the reported span.
+  await page.selectOption("#run-duration", "86400");
+  await page.locator("#energise").click();
+  await wait(900);
+  const dayText = await page.locator("#run-report").innerText();
+  if (!/시간/.test(dayText)) {
+    failures.push(`24시간 운전 결과에 시간 단위가 없습니다: ${dayText.slice(0, 60)}`);
+  }
+
+  // Beginner mode must hide the advanced settings and keep the design working.
+  await page.evaluate(() => window.__lab.setDevice("transformer"));
+  await wait(500);
+  await page.locator(".group-tab", { hasText: "치수" }).first().click();
+  await wait(200);
+  const expertCount = await page.evaluate(() => {
+    window.__lab.setBeginner(false);
+    return window.__lab.controlCount();
+  });
+  const beginnerCount = await page.evaluate(() => {
+    window.__lab.setBeginner(true);
+    return window.__lab.controlCount();
+  });
+  if (!(beginnerCount < expertCount)) {
+    failures.push(`초보자 모드가 설정을 줄이지 않았습니다 (${expertCount} -> ${beginnerCount})`);
+  }
+
+  // Recommendations must exist, apply, and leave the design valid.
+  await page.evaluate(() => {
+    window.__lab.setDevice("transformer");
+    window.__lab.setValue("vin", 380);
+    window.__lab.setValue("voutTarget", 48);
+  });
+  await wait(500);
+  const advice = await page.evaluate(() => window.__lab.advice());
+  if (!(advice.length > 0)) failures.push("전압을 바꿨는데 추천값이 나오지 않았습니다");
+  for (const item of advice) {
+    if (!item.reason || !item.label) failures.push("추천값에 근거가 없습니다");
+  }
+  if (await page.locator("#advice").isHidden()) {
+    failures.push("추천 카드가 표시되지 않았습니다");
+  }
+  await page.evaluate(() => {
+    document.querySelector(".panel").scrollTop = 0;
+  });
+  await wait(200);
+  await page.screenshot({ path: `${OUT}/advice.png` });
+  await page.locator(".advice-apply").click();
+  await wait(600);
+  const afterApply = await page.evaluate(() => {
+    const r = window.__lab.result();
+    return {
+      errors: r.warnings.filter((w) => w.level === "error").length,
+      vout: r.metrics.find((m) => m.key === "vout").raw,
+    };
+  });
+  if (afterApply.errors > 0) {
+    failures.push(`추천값을 적용했는데 오류가 ${afterApply.errors}건 남았습니다`);
+  }
+  if (Math.abs(afterApply.vout - 48) / 48 > 0.15) {
+    failures.push(`추천값 적용 후 출력이 목표에서 벗어납니다 (${afterApply.vout})`);
+  }
+
+  // Every inductor core shape must build and render.
+  for (const shape of ["toroid", "ei", "etd", "pot", "rod"]) {
+    await page.evaluate((value) => {
+      window.__lab.setDevice("inductor");
+      window.__lab.setValue("shape", value);
+    }, shape);
+    await wait(500);
+    const drawn = await canvasIsDrawn();
+    if (!drawn.ok) failures.push(`${shape} 코어가 그려지지 않았습니다 (${drawn.reason})`);
+    await page.screenshot({ path: `${OUT}/shape-${shape}.png` });
+  }
 
   // Desktop layout.
   await page.setViewportSize({ width: 1280, height: 800 });

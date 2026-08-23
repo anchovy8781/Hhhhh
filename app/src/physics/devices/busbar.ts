@@ -19,6 +19,7 @@ import {
 import type { RuntimeSpec } from "../run";
 import { part } from "../run";
 import { applicationWarnings, conductorParam } from "./shared";
+import { type Recommendation } from "../recommend";
 
 export const busbar: DeviceDefinition = {
   id: "busbar",
@@ -33,6 +34,7 @@ export const busbar: DeviceDefinition = {
       label: "표면 처리",
       group: "재료",
       default: "tin",
+      advanced: true,
       options: [
         { value: "bare", label: "무처리 (광택)", note: "방사율이 낮아 복사 방열이 거의 없습니다." },
         { value: "tin", label: "주석 도금", note: "접촉 저항이 안정적이고 부식에 강합니다." },
@@ -43,14 +45,63 @@ export const busbar: DeviceDefinition = {
     { kind: "number", key: "width", label: "폭", unit: "mm", min: 3, max: 250, step: 1, default: 40, group: "치수" },
     { kind: "number", key: "thickness", label: "두께", unit: "mm", min: 0.5, max: 40, step: 0.5, default: 5, group: "치수" },
     { kind: "number", key: "length", label: "길이", unit: "mm", min: 20, max: 5000, step: 10, default: 500, group: "치수" },
-    { kind: "number", key: "bars", label: "병렬 매수", unit: "매", min: 1, max: 6, step: 1, default: 1, group: "치수", hint: "여러 매를 겹치면 안쪽 면이 막혀 방열 효율이 떨어집니다." },
+    { kind: "number", key: "bars", label: "병렬 매수", unit: "매", min: 1, max: 6, step: 1, default: 1, group: "치수", hint: "여러 매를 겹치면 안쪽 면이 막혀 방열 효율이 떨어집니다.", advanced: true },
     { kind: "number", key: "current", label: "통전 전류 (rms)", unit: "A", min: 1, max: 8000, step: 1, default: 400, group: "운전" },
     { kind: "number", key: "freq", label: "주파수", unit: "Hz", min: 0, max: 2000, step: 1, default: 60, group: "운전", hint: "0이면 DC. 주파수가 오르면 표피효과로 유효 단면이 줄어듭니다." },
-    { kind: "number", key: "voltage", label: "계통 전압", unit: "V", min: 12, max: 40000, step: 1, default: 400, group: "운전" },
+    { kind: "number", key: "voltage", label: "계통 전압", unit: "V", min: 12, max: 40000, step: 1, default: 400, group: "운전", advanced: true },
     ...environmentParams(),
   ],
   simulate,
+  recommend,
 };
+
+/** Cross-section for the current, scaled straight from the computed ampacity. */
+function recommend(values: ParamValues): Recommendation[] {
+  const result = simulate(values);
+  const ampacity = result.metrics.find((m) => m.key === "ampacity")?.raw ?? 0;
+  const current = num(values, "current");
+  const width = num(values, "width");
+  const thickness = num(values, "thickness");
+  const out: Recommendation[] = [];
+  if (ampacity <= 0) return out;
+
+  // Ampacity is close to linear in cross-section over a modest range, so a
+  // 15 % margin on the ratio is a sound first cut.
+  const scale = (current * 1.15) / ampacity;
+  if (scale > 1.05 || scale < 0.7) {
+    const suggested = Math.max(1, Math.round(width * scale));
+    out.push({
+      key: "width",
+      value: suggested,
+      label: `폭 ${width} → ${suggested} mm`,
+      reason: `${current}A에 15% 여유를 두려면 지금 단면의 ${scale.toFixed(2)}배가 필요합니다 (현재 용량 ${ampacity.toFixed(0)}A).`,
+    });
+  }
+
+  const freq = num(values, "freq");
+  if (freq > 0) {
+    const conductor = conductorMaterial(str(values, "conductor"));
+    const delta =
+      Math.sqrt(resistivityAt(conductor, 70) / (Math.PI * freq * MU0)) * 1e3;
+    if (thickness > delta * 2.2) {
+      out.push({
+        key: "thickness",
+        value: Math.max(0.5, Math.round(delta * 2 * 2) / 2),
+        label: `두께 ${thickness} → ${Math.max(0.5, Math.round(delta * 2 * 2) / 2)} mm`,
+        reason: `${freq}Hz의 표피 깊이는 ${delta.toFixed(2)}mm입니다. 이보다 두꺼운 부분은 전류가 거의 흐르지 않으니, 얇은 바 여러 매로 나누는 편이 낫습니다.`,
+      });
+    }
+  }
+  if (str(values, "finish") !== "black") {
+    out.push({
+      key: "finish",
+      value: "black",
+      label: "표면 처리 → 흑색 도장",
+      reason: "방사율이 0.25에서 0.95로 오르면 같은 단면으로 통전 용량이 눈에 띄게 커집니다. 가장 싼 개선입니다.",
+    });
+  }
+  return out;
+}
 
 const EMISSIVITY: Record<string, number> = {
   bare: 0.08,

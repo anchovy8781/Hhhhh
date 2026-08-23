@@ -117,14 +117,25 @@ describe("인덕터", () => {
 
 describe("변압기", () => {
   it("follows the turns ratio", () => {
-    const result = run("transformer", { np: 480, ns: 48, pout: 0 });
+    // 1 VA stands in for no load: the slider is logarithmic, so it cannot
+    // reach zero, and an unloaded transformer is a real operating point.
+    const result = run("transformer", { np: 480, ns: 48, kva: 0.001 });
     expect(get(result.metrics, "ratio")).toBeCloseTo(10, 6);
     expect(get(result.metrics, "vout")).toBeCloseTo(22, 0);
   });
 
+  it("draws current for reactive load even at the same watts", () => {
+    const unity = run("transformer", { kva: 0.3, pf: 1 });
+    const lagging = run("transformer", { kva: 0.3, pf: 0.6 });
+    // Same apparent power means the same current and the same copper loss,
+    // but less of it does any work.
+    expect(get(lagging.metrics, "ipri")).toBeCloseTo(get(unity.metrics, "ipri"), 6);
+    expect(get(lagging.metrics, "eff")).toBeLessThan(get(unity.metrics, "eff"));
+  });
+
   it("sets flux density from volts per turn, not from the load", () => {
-    const light = run("transformer", { pout: 10 });
-    const heavy = run("transformer", { pout: 400 });
+    const light = run("transformer", { kva: 0.01 });
+    const heavy = run("transformer", { kva: 0.4 });
     expect(get(heavy.metrics, "bpeak")).toBeCloseTo(get(light.metrics, "bpeak"), 6);
   });
 
@@ -141,16 +152,17 @@ describe("변압기", () => {
   });
 
   it("droops the output voltage under load", () => {
-    const light = run("transformer", { pout: 5 });
-    const heavy = run("transformer", { pout: 300 });
+    const light = run("transformer", { kva: 0.005 });
+    const heavy = run("transformer", { kva: 0.3 });
     expect(get(heavy.metrics, "vout")).toBeLessThan(get(light.metrics, "vout"));
     expect(get(heavy.metrics, "reg")).toBeGreaterThan(get(light.metrics, "reg"));
   });
 
   it("keeps iron loss when the load is removed", () => {
-    const result = run("transformer", { pout: 0 });
+    const result = run("transformer", { kva: 0.001 });
     expect(get(result.metrics, "pfe")).toBeGreaterThan(0);
-    expect(get(result.metrics, "pcu")).toBeCloseTo(0, 9);
+    // Copper loss all but vanishes; iron loss does not care about the load.
+    expect(get(result.metrics, "pcu")).toBeLessThan(get(result.metrics, "pfe") / 100);
   });
 
   it("prefers amorphous over silicon steel for iron loss", () => {
@@ -171,9 +183,9 @@ describe("변압기", () => {
   });
 
   it("plots an efficiency curve through the design point", () => {
-    const result = run("transformer", { pout: 100 });
+    const result = run("transformer", { kva: 0.1, pf: 1 });
     const curve = result.curves.find((c) => c.key === "eff")!;
-    expect(curve.marker!.x).toBe(100);
+    expect(curve.marker!.x).toBeCloseTo(100, 6);
     expect(Math.max(...curve.points.map((p) => p.y))).toBeLessThanOrEqual(1);
   });
 });
@@ -296,5 +308,144 @@ describe("DC 모터", () => {
     const kt = get(result.metrics, "kt");
     const rpm = get(result.metrics, "noload");
     expect(rpm).toBeCloseTo((24 / kt) * (60 / (2 * Math.PI)), 0);
+  });
+});
+
+describe("추천값", () => {
+  it("offers recommendations for every device that has a target", () => {
+    for (const definition of DEVICES) {
+      if (!definition.recommend) continue;
+      const suggestions = definition.recommend(defaultValues(definition));
+      for (const item of suggestions) {
+        expect(item.reason.length, `${definition.id}/${item.key}`).toBeGreaterThan(10);
+        expect(item.label).toContain("→");
+        expect(definition.params.some((p) => p.key === item.key)).toBe(true);
+      }
+    }
+  });
+
+  it("applies cleanly: taking every recommendation leaves a valid design", () => {
+    for (const definition of DEVICES) {
+      if (!definition.recommend) continue;
+      const values = { ...defaultValues(definition) };
+      for (let round = 0; round < 3; round++) {
+        const suggestions = definition.recommend(values);
+        if (suggestions.length === 0) break;
+        for (const item of suggestions) values[item.key] = item.value;
+      }
+      const result = definition.simulate(values);
+      for (const metric of result.metrics) {
+        expect(Number.isFinite(metric.raw), `${definition.id}/${metric.key}`).toBe(true);
+      }
+    }
+  });
+
+  it("gives a transformer the turns its voltage and core actually need", () => {
+    const definition = device("transformer");
+    const values = { ...defaultValues(definition), vin: 380, voutTarget: 48 };
+    const suggestions = definition.recommend!(values);
+    const turns = suggestions.find((s) => s.key === "np");
+    expect(turns).toBeTruthy();
+    const applied = { ...values, ...Object.fromEntries(suggestions.map((s) => [s.key, s.value])) };
+    const result = definition.simulate(applied);
+    // The whole point: after applying, the core is inside its own limits and
+    // the output lands on the voltage that was asked for.
+    expect(result.warnings.filter((w) => w.level === "error")).toEqual([]);
+    expect(get(result.metrics, "vout")).toBeGreaterThan(48 * 0.9);
+    expect(get(result.metrics, "vout")).toBeLessThan(48 * 1.12);
+  });
+
+  it("re-recommends when the voltage changes", () => {
+    const definition = device("transformer");
+    const low = definition.recommend!({ ...defaultValues(definition), vin: 110 });
+    const high = definition.recommend!({ ...defaultValues(definition), vin: 400 });
+    const np = (list: typeof low) => list.find((s) => s.key === "np")?.value as number;
+    // Turns follow the voltage: four times the volts, four times the turns.
+    expect(np(high) / np(low)).toBeCloseTo(400 / 110, 1);
+  });
+
+  it("gives a motor the turns its target speed needs", () => {
+    const definition = device("motor");
+    const values = { ...defaultValues(definition), voltage: 48, targetRpm: 3000 };
+    const suggestions = definition.recommend!(values);
+    const applied = { ...values, ...Object.fromEntries(suggestions.map((s) => [s.key, s.value])) };
+    const rpm = get(definition.simulate(applied).metrics, "noload");
+    expect(rpm).toBeGreaterThan(3000 * 0.9);
+    expect(rpm).toBeLessThan(3000 * 1.1);
+  });
+
+  it("gives an inductor the turns and gap its target inductance needs", () => {
+    const definition = device("inductor");
+    const values = { ...defaultValues(definition), targetL: 220e-6, idc: 6 };
+    const suggestions = definition.recommend!(values);
+    const applied = { ...values, ...Object.fromEntries(suggestions.map((s) => [s.key, s.value])) };
+    const result = definition.simulate(applied);
+    expect(get(result.metrics, "L0")).toBeGreaterThan(220e-6 * 0.8);
+    expect(get(result.metrics, "L0")).toBeLessThan(220e-6 * 1.3);
+  });
+
+  it("sizes a busbar for the current it is asked to carry", () => {
+    const definition = device("busbar");
+    const values = { ...defaultValues(definition), current: 1200 };
+    const suggestions = definition.recommend!(values);
+    const applied = { ...values, ...Object.fromEntries(suggestions.map((s) => [s.key, s.value])) };
+    const result = definition.simulate(applied);
+    expect(get(result.metrics, "ampacity")).toBeGreaterThan(1200);
+  });
+});
+
+describe("인덕터 코어 형상", () => {
+  const shapes = ["toroid", "ei", "etd", "pot", "rod"];
+
+  it("computes a usable design for every shape", () => {
+    for (const shape of shapes) {
+      const result = run("inductor", { shape });
+      expect(get(result.metrics, "L0"), shape).toBeGreaterThan(0);
+      expect(get(result.metrics, "rdc"), shape).toBeGreaterThan(0);
+      expect(Number.isFinite(get(result.metrics, "temp")), shape).toBe(true);
+      expect(result.build.kind, shape).toBeTruthy();
+    }
+  });
+
+  it("gives a rod core far less inductance than the same iron closed up", () => {
+    // Compare like for like: a genuinely slender rod, not the squat disc the
+    // default dimensions would make.
+    const closed = run("inductor", { shape: "toroid", od: 27, id: 14, height: 11 });
+    const open = run("inductor", { shape: "rod", od: 10, height: 60 });
+    // An open path spends nearly all of its mmf on the air outside the rod.
+    expect(get(open.metrics, "mue")).toBeLessThan(get(closed.metrics, "mue") / 2);
+    expect(get(open.metrics, "L0")).toBeLessThan(get(closed.metrics, "L0"));
+  });
+
+  it("makes a rod core nearly impossible to saturate", () => {
+    const closed = run("inductor", { shape: "toroid", coreMaterial: "ferrite-n87" });
+    const open = run("inductor", {
+      shape: "rod",
+      coreMaterial: "ferrite-n87",
+      od: 10,
+      height: 60,
+    });
+    expect(get(open.metrics, "isat")).toBeGreaterThan(get(closed.metrics, "isat") * 5);
+  });
+
+  it("shortens the mean turn on an ETD versus the same EI", () => {
+    const ei = run("inductor", { shape: "ei" });
+    const etd = run("inductor", { shape: "etd" });
+    // A round centre leg is the shortest perimeter for a given area, so the
+    // same turns cost less copper and less resistance.
+    expect(get(etd.metrics, "wire")).toBeLessThan(get(ei.metrics, "wire"));
+    expect(get(etd.metrics, "rdc")).toBeLessThan(get(ei.metrics, "rdc"));
+  });
+
+  it("keeps a pot core fully enclosed, so its window is small", () => {
+    const pot = run("inductor", { shape: "pot" });
+    const toroid = run("inductor", { shape: "toroid" });
+    expect(get(pot.metrics, "fill")).toBeGreaterThan(get(toroid.metrics, "fill"));
+  });
+
+  it("grows a rod's effective permeability with its slenderness", () => {
+    const stubby = run("inductor", { shape: "rod", od: 20, height: 40 });
+    const slender = run("inductor", { shape: "rod", od: 8, height: 200 });
+    expect(get(slender.metrics, "mue")).toBeGreaterThan(get(stubby.metrics, "mue") * 2);
   });
 });

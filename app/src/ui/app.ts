@@ -18,7 +18,8 @@ import {
 import { applicationValues } from "../physics/applications";
 import { readEnvironment } from "../physics/environment";
 import { formatTime, runDevice, type RunResult } from "../physics/run";
-import { buildDevice } from "../view3d/builders";
+import { buildDevice, type BuiltDevice } from "../view3d/builders";
+import { Timelapse } from "../view3d/timelapse";
 import { clearGroup, createViewer, type Viewer } from "../view3d/scene";
 import { drawCurve } from "./chart";
 import { PRESETS } from "./presets";
@@ -37,8 +38,16 @@ export function startApp(): void {
   let current: DeviceDefinition = DEVICES[0]!;
   let values: ParamValues = defaultValues(current);
   let activeGroup: ParamGroup = "재료";
+  /**
+   * Beginner mode hides the second-order settings and leans on the
+   * recommendations. It starts on: the people who need it most are exactly the
+   * ones who will not go looking for a switch.
+   */
+  let beginner = true;
   /** Rebuilding geometry costs more than recomputing numbers; throttle it. */
   let pendingBuild = 0;
+  let built: BuiltDevice | null = null;
+  let timelapse: Timelapse | null = null;
 
   const tabs = el("device-tabs");
   for (const definition of DEVICES) {
@@ -73,6 +82,16 @@ export function startApp(): void {
     viewer.setCutaway(on);
   });
 
+  const beginnerButton = el<HTMLButtonElement>("beginner");
+  beginnerButton.addEventListener("click", () => {
+    beginner = !beginner;
+    beginnerButton.setAttribute("aria-pressed", String(beginner));
+    beginnerButton.textContent = beginner ? "초보자 모드" : "전문가 모드";
+    renderGuide();
+    renderControls();
+    update(false);
+  });
+
   el<HTMLButtonElement>("picker-close").addEventListener("click", closePicker);
   el("picker").addEventListener("click", (event) => {
     if (event.target === el("picker")) closePicker();
@@ -91,6 +110,7 @@ export function startApp(): void {
     values = defaultValues(definition);
     activeGroup = "재료";
     el("tagline").textContent = definition.tagline;
+    renderGuide();
     renderDeviceTabs();
     renderGroupTabs();
     renderControls();
@@ -122,6 +142,7 @@ export function startApp(): void {
     host.replaceChildren();
     for (const param of current.params) {
       if (param.group !== activeGroup) continue;
+      if (beginner && param.advanced) continue;
       host.append(
         param.kind === "number"
           ? numberControl(param)
@@ -370,6 +391,76 @@ export function startApp(): void {
     }
   }
 
+  /** Three sentences telling a newcomer what this screen is for. */
+  function renderGuide() {
+    const host = el("guide");
+    host.replaceChildren();
+    if (!beginner) return;
+    const steps: [string, string][] = [
+      ["1. 고르기", "만들 기기와 재료를 고릅니다"],
+      ["2. 목표 넣기", "전압·용량 같은 원하는 값을 넣고 추천을 적용합니다"],
+      ["3. 돌려보기", "전원을 인가해 30분을 버티는지 봅니다"],
+    ];
+    for (const [title, body] of steps) {
+      const box = document.createElement("div");
+      box.className = "guide-step";
+      box.innerHTML = `<b>${title}</b>${body}`;
+      host.append(box);
+    }
+  }
+
+  /**
+   * The recommendation card.
+   *
+   * This is the answer to the blank-sheet problem: it turns "what turns count
+   * do I need?" into a button, and says which equation produced each number so
+   * the answer can be checked rather than trusted.
+   */
+  function renderAdvice() {
+    const host = el("advice");
+    host.replaceChildren();
+    if (!current.recommend) {
+      host.hidden = true;
+      return;
+    }
+    let suggestions: ReturnType<NonNullable<typeof current.recommend>>;
+    try {
+      suggestions = current.recommend(values);
+    } catch {
+      host.hidden = true;
+      return;
+    }
+    if (suggestions.length === 0) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+
+    const head = document.createElement("div");
+    head.className = "advice-head";
+    const title = document.createElement("span");
+    title.className = "advice-title";
+    title.textContent = `추천값 ${suggestions.length}건`;
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "advice-apply";
+    apply.textContent = "모두 적용";
+    apply.addEventListener("click", () => {
+      for (const item of suggestions) values[item.key] = item.value;
+      renderControls();
+      update(true);
+    });
+    head.append(title, apply);
+    host.append(head);
+
+    for (const item of suggestions) {
+      const box = document.createElement("div");
+      box.className = "advice-item";
+      box.innerHTML = `<div>${item.label}</div><div class="ai-why">${item.reason}</div>`;
+      host.append(box);
+    }
+  }
+
   function renderPresets() {
     const host = el("presets");
     host.replaceChildren();
@@ -403,6 +494,7 @@ export function startApp(): void {
       el("run-report").hidden = true;
     }
     renderHeadline(result);
+    renderAdvice();
     renderWarnings(result);
     renderAllMetrics(result);
     renderCurves(result);
@@ -419,11 +511,49 @@ export function startApp(): void {
   }
 
   function rebuild(result: DeviceResult) {
+    stopTimelapse();
     clearGroup(viewer.stage);
-    const built = buildDevice(result.build);
+    built = buildDevice(result.build);
     viewer.stage.add(built.group);
     viewer.frame(built.radius);
     renderBadges(result, built.turnsAbbreviated);
+  }
+
+  function stopTimelapse() {
+    timelapse?.dispose();
+    timelapse = null;
+    clearGroup(viewer.effects);
+    el("timelapse").hidden = true;
+  }
+
+  /** Play the run back on the model itself. */
+  function startTimelapse(run: RunResult, result: DeviceResult) {
+    stopTimelapse();
+    if (!built || !result.runtime) return;
+    const player = new Timelapse(
+      viewer.stage,
+      viewer.effects,
+      run,
+      result.runtime.parts,
+      built.radius,
+    );
+    timelapse = player;
+    const bar = el("timelapse");
+    const fill = el("tl-fill");
+    const readout = el("tl-readout");
+    bar.hidden = false;
+    player.onUpdate((state) => {
+      fill.style.width = `${(state.fraction * 100).toFixed(1)}%`;
+      const winding = state.temperatures.winding ?? state.temperatures.core ?? 0;
+      const failures = state.fired.filter((event) => event.level === "error");
+      fill.classList.toggle("hot", failures.length > 0);
+      const speed = state.rpm > 0 ? ` · ${state.rpm.toFixed(0)} rpm` : "";
+      const latest = failures.at(-1);
+      readout.textContent = latest
+        ? `${formatTime(state.time)} · ${winding.toFixed(0)}°C — ${latest.title}`
+        : `${formatTime(state.time)} · 권선 ${winding.toFixed(0)}°C · ${state.current.toFixed(2)} A${speed}`;
+    });
+    player.play();
   }
 
   function renderBadges(result: DeviceResult, abbreviated: boolean) {
@@ -543,12 +673,14 @@ export function startApp(): void {
       return;
     }
 
-    const run = runDevice(result.runtime, readEnvironment(values), { duration: 1800 });
+    const duration = Number(el<HTMLSelectElement>("run-duration").value) || 1800;
+    const run = runDevice(result.runtime, readEnvironment(values), { duration });
     renderRun(run, result);
+    startTimelapse(run, result);
     button.dataset.state = run.verdict;
     button.textContent =
       run.verdict === "ok"
-        ? "⚡ 30분 연속 운전 통과 — 다시 돌려보기"
+        ? `⚡ ${formatTime(run.duration)} 연속 운전 통과 — 다시 돌려보기`
         : run.verdict === "warn"
           ? "⚠ 한계에 근접했습니다 — 아래 확인"
           : "⛔ 운전 중 고장 — 아래 확인";
@@ -561,12 +693,13 @@ export function startApp(): void {
 
     const verdict = document.createElement("div");
     verdict.className = `run-verdict ${run.verdict}`;
+    const span = formatTime(run.duration);
     verdict.textContent =
       run.verdict === "fail"
         ? `${formatTime(run.failedAt ?? 0)} 만에 ${PART_LABELS[run.failedPart ?? ""] ?? "부품"}이(가) 고장났습니다`
         : run.verdict === "warn"
-          ? "30분 운전은 버텼지만 여유가 없습니다"
-          : "30분 연속 운전, 이상 없음";
+          ? `${span} 운전은 버텼지만 여유가 없습니다`
+          : `${span} 연속 운전, 이상 없음`;
     report.append(verdict);
 
     const stats = document.createElement("div");
@@ -661,8 +794,23 @@ export function startApp(): void {
         ? runDevice(built.runtime, readEnvironment(values), { duration: 1800 })
         : null;
     },
+    advice: () => (current.recommend ? current.recommend(values) : []),
+    setBeginner: (on: boolean) => {
+      beginner = on;
+      beginnerButton.setAttribute("aria-pressed", String(on));
+      renderControls();
+    },
+    controlCount: () => document.querySelectorAll(".control").length,
     search: (query: string, kind: string) =>
       searchCatalog(query, { kind: kind as CatalogKind, limit: 20 }).map((i) => i.id),
+    timelapseState: () => {
+      let captured: unknown = null;
+      timelapse?.onUpdate((state) => {
+        captured = state;
+      });
+      return captured;
+    },
+    effectCount: () => viewer.effects.children.length,
     openPickerFor: (key: string) => {
       const param = current.params.find((p) => p.key === key);
       if (param && param.kind === "catalog") openPicker(param);

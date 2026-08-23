@@ -198,10 +198,21 @@ describe("fault localisation", () => {
   });
 
   it("catches a transformer saturating on inrush", () => {
-    const run = energise("transformer", { np: 200, ns: 22 });
-    const saturation = run.events.find((e) => e.title.includes("포화"));
+    const run = energise("transformer");
+    const saturation = run.events.find((e) => e.title.includes("돌입"));
     expect(saturation).toBeTruthy();
     expect(saturation!.partId).toBe("core");
+    // The first peak is limited by the winding resistance, not by the
+    // magnetising inductance, because the core is briefly just air.
+    expect(run.peakCurrent).toBeGreaterThan(run.steadyCurrent * 20);
+    expect(saturation!.advice).toContain("소프트 스타트");
+  });
+
+  it("settles a transformer back to its rated current after the inrush", () => {
+    const run = energise("transformer");
+    const settled = run.electrical.slice(-30).map((s) => Math.abs(s.current));
+    expect(Math.max(...settled)).toBeLessThan(run.peakCurrent / 10);
+    expect(run.verdict).not.toBe("fail");
   });
 
   it("survives the same run in a better environment", () => {

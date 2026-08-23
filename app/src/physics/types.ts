@@ -15,6 +15,8 @@ export interface NumberParam {
   hint?: string;
   /** Slider position is logarithmic when the range spans decades. */
   log?: boolean;
+  /** Hidden in beginner mode: a second-order setting with a sane default. */
+  advanced?: boolean;
 }
 
 export interface ChoiceParam {
@@ -25,6 +27,8 @@ export interface ChoiceParam {
   default: string;
   group: ParamGroup;
   hint?: string;
+  /** Hidden in beginner mode: a second-order setting with a sane default. */
+  advanced?: boolean;
 }
 
 /**
@@ -45,6 +49,7 @@ export interface CatalogParam {
   hint?: string;
   /** Tags that pre-filter the list, e.g. only common-mode choke cores. */
   suggestedTags?: string[];
+  advanced?: boolean;
 }
 
 export type Param = NumberParam | ChoiceParam | CatalogParam;
@@ -97,6 +102,8 @@ export type BuildSpec =
       windowWidth: number;
       windowHeight: number;
       gap: number;
+      /** ETD cores have a round centre leg; EI cores a rectangular one. */
+      roundLeg?: boolean;
       coreColor: number;
       windings: WindingVisual[];
       saturation: number;
@@ -110,6 +117,24 @@ export type BuildSpec =
       plungerLength: number;
       gap: number;
       shellThickness: number;
+      coreColor: number;
+      windings: WindingVisual[];
+      saturation: number;
+    }
+  | {
+      kind: "pot";
+      outerDiameter: number;
+      height: number;
+      legDiameter: number;
+      gap: number;
+      coreColor: number;
+      windings: WindingVisual[];
+      saturation: number;
+    }
+  | {
+      kind: "rod";
+      diameter: number;
+      length: number;
       coreColor: number;
       windings: WindingVisual[];
       saturation: number;
@@ -171,6 +196,11 @@ export interface DeviceDefinition {
   icon: string;
   params: Param[];
   simulate(values: ParamValues): DeviceResult;
+  /**
+   * Values that would make this design work, given what the user has already
+   * decided (voltage, power, frequency). Empty when nothing needs changing.
+   */
+  recommend?(values: ParamValues): import("./recommend").Recommendation[];
 }
 
 // -- value helpers ---------------------------------------------------------

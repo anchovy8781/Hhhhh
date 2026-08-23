@@ -139,6 +139,38 @@ export function toroidDims(od: number, id: number, height: number): CoreDims {
   };
 }
 
+export function potDims(
+  outerDiameter: number,
+  height: number,
+  legDiameter: number,
+): CoreDims {
+  return {
+    shape: "pot",
+    outerDiameter: outerDiameter * 1e-3,
+    height: height * 1e-3,
+    legDiameter: Math.min(legDiameter, outerDiameter * 0.6) * 1e-3,
+  };
+}
+
+export function etdDims(
+  legDiameter: number,
+  depth: number,
+  windowWidth: number,
+  windowHeight: number,
+): CoreDims {
+  return {
+    shape: "etd",
+    legDiameter: legDiameter * 1e-3,
+    depth: depth * 1e-3,
+    windowWidth: windowWidth * 1e-3,
+    windowHeight: windowHeight * 1e-3,
+  };
+}
+
+export function rodDims(diameter: number, length: number): CoreDims {
+  return { shape: "rod", diameter: diameter * 1e-3, length: length * 1e-3 };
+}
+
 export function eiDims(
   tongue: number,
   stack: number,

@@ -10,6 +10,8 @@ export interface Viewer {
   controls: OrbitControls;
   /** Everything the device builder owns; cleared on every rebuild. */
   stage: THREE.Group;
+  /** Smoke, flame and debris live here so a rebuild does not wipe them. */
+  effects: THREE.Group;
   setBackground(dark: boolean): void;
   /** Hide the near half of the device so the winding inside is visible. */
   setCutaway(on: boolean): void;
@@ -50,7 +52,8 @@ export function createViewer(canvas: HTMLCanvasElement): Viewer {
   scene.add(key, fill, rim, new THREE.AmbientLight(0xffffff, 0.35));
 
   const stage = new THREE.Group();
-  scene.add(stage);
+  const effects = new THREE.Group();
+  scene.add(stage, effects);
 
   const grid = new THREE.GridHelper(400, 20, 0x334155, 0x1e293b);
   grid.position.y = -40;
@@ -119,6 +122,7 @@ export function createViewer(canvas: HTMLCanvasElement): Viewer {
     renderer,
     controls,
     stage,
+    effects,
     setBackground,
     setCutaway,
     frame,

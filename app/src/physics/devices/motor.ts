@@ -7,6 +7,13 @@ import {
   magnetMaterial,
 } from "../materials";
 import { solveThermal } from "../thermal";
+import {
+  currentDensity,
+  meaningful,
+  recommendAwg,
+  wireReason,
+  type Recommendation,
+} from "../recommend";
 import { environmentParams, readEnvironment } from "../environment";
 import { analyzeWinding } from "../wire";
 import {
@@ -50,19 +57,66 @@ export const motor: DeviceDefinition = {
     { kind: "number", key: "stackLength", label: "적층 길이", unit: "mm", min: 5, max: 200, step: 1, default: 40, group: "치수" },
     { kind: "number", key: "airGap", label: "공극", unit: "mm", min: 0.15, max: 3, step: 0.05, default: 0.5, group: "치수", hint: "공극이 커지면 자속이 급격히 줄어듭니다." },
     { kind: "number", key: "magnetThickness", label: "자석 두께", unit: "mm", min: 1, max: 25, step: 0.5, default: 5, group: "치수" },
-    { kind: "number", key: "yokeThickness", label: "고정자 요크 두께", unit: "mm", min: 0.5, max: 30, step: 0.5, default: 10, group: "치수", hint: "자속의 귀환 경로. 얇으면 포화해서 자석을 키워도 토크가 늘지 않습니다." },
-    { kind: "number", key: "poles", label: "극수", unit: "극", min: 2, max: 12, step: 2, default: 4, group: "치수" },
-    { kind: "number", key: "slots", label: "슬롯 수", unit: "개", min: 3, max: 36, step: 1, default: 12, group: "권선" },
+    { kind: "number", key: "yokeThickness", label: "고정자 요크 두께", unit: "mm", min: 0.5, max: 30, step: 0.5, default: 10, group: "치수", hint: "자속의 귀환 경로. 얇으면 포화해서 자석을 키워도 토크가 늘지 않습니다.", advanced: true },
+    { kind: "number", key: "poles", label: "극수", unit: "극", min: 2, max: 12, step: 2, default: 4, group: "치수", advanced: true },
+    { kind: "number", key: "slots", label: "슬롯 수", unit: "개", min: 3, max: 36, step: 1, default: 12, group: "권선", advanced: true },
     { kind: "number", key: "turnsPerCoil", label: "코일당 턴수", unit: "T", min: 1, max: 500, step: 1, default: 30, group: "권선" },
     { kind: "number", key: "awg", label: "전선 굵기", unit: "AWG", min: 8, max: 40, step: 1, default: 22, group: "권선" },
     { kind: "number", key: "voltage", label: "인가 전압", unit: "V", min: 1, max: 800, step: 1, default: 24, group: "운전" },
     { kind: "number", key: "loadTorque", label: "부하 토크", unit: "N·m", min: 0, max: 50, step: 0.01, default: 0.15, group: "운전" },
-    { kind: "number", key: "brushDrop", label: "브러시 전압강하", unit: "V", min: 0, max: 5, step: 0.1, default: 1.5, group: "운전", hint: "탄소 브러시 2개 합계. 저전압 모터에서는 효율을 크게 갉아먹습니다." },
+    { kind: "number", key: "targetRpm", label: "목표 무부하 회전수", unit: "rpm", min: 60, max: 60000, step: 10, default: 1800, group: "운전", log: true, hint: "인가 전압에서 이 회전수가 나오도록 턴수를 추천합니다." },
+    { kind: "number", key: "brushDrop", label: "브러시 전압강하", unit: "V", min: 0, max: 5, step: 0.1, default: 1.5, group: "운전", hint: "탄소 브러시 2개 합계. 저전압 모터에서는 효율을 크게 갉아먹습니다.", advanced: true },
     insulationClassParam(),
     ...environmentParams(),
   ],
   simulate,
+  recommend,
 };
+
+/**
+ * Turns for the speed you asked for.
+ *
+ * Speed is set by the back-EMF constant, and Ke is set by flux times turns.
+ * So once the magnet and the geometry are chosen, the turns count is simply
+ * whatever makes `V / Ke` land on the target -- and the wire has to carry the
+ * current that the load torque then demands.
+ */
+function recommend(values: ParamValues): Recommendation[] {
+  const result = simulate(values);
+  const kt = result.metrics.find((m) => m.key === "kt")?.raw ?? 0;
+  const turnsPerCoil = Math.round(num(values, "turnsPerCoil"));
+  const voltage = num(values, "voltage");
+  const drop = num(values, "brushDrop");
+  const targetRpm = num(values, "targetRpm");
+  const loadTorque = num(values, "loadTorque");
+  const out: Recommendation[] = [];
+  if (kt <= 0) return out;
+
+  const targetOmega = (targetRpm * 2 * Math.PI) / 60;
+  const neededKe = Math.max(voltage - drop, 1e-6) / targetOmega;
+  const suggested = Math.max(1, Math.round((turnsPerCoil * neededKe) / kt));
+  if (meaningful(turnsPerCoil, suggested, 0.05)) {
+    out.push({
+      key: "turnsPerCoil",
+      value: suggested,
+      label: `코일당 턴수 ${turnsPerCoil} → ${suggested}`,
+      reason: `${voltage}V에서 ${targetRpm}rpm을 내려면 Ke = ${neededKe.toFixed(4)} V·s/rad가 필요하고, Ke는 턴수에 비례합니다.`,
+    });
+  }
+
+  const current = loadTorque / (kt * (suggested / Math.max(turnsPerCoil, 1)));
+  const density = currentDensity(voltage * current);
+  const awg = recommendAwg(Math.max(current, 1e-3), density);
+  if (Math.abs(awg - Math.round(num(values, "awg"))) >= 1) {
+    out.push({
+      key: "awg",
+      value: awg,
+      label: `전선 AWG${Math.round(num(values, "awg"))} → AWG${awg}`,
+      reason: wireReason(awg, current, density),
+    });
+  }
+  return out;
+}
 
 function simulate(values: ParamValues): DeviceResult {
   const environment = readEnvironment(values);

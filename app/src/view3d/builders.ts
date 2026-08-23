@@ -14,6 +14,9 @@ import { coreSurface, gapSurface, magnetSurface, plasticSurface, wireSurface } f
 const MAX_DRAWN_TURNS = 46;
 const TUBE_SEGMENTS_PER_TURN = 10;
 
+/** Roles the timelapse animates: it needs to know what to spin and what to heat. */
+export type MeshRole = "core" | "winding" | "magnet" | "rotor" | "plunger" | "other";
+
 export interface BuiltDevice {
   group: THREE.Group;
   /**
@@ -140,6 +143,10 @@ export function buildDevice(spec: BuildSpec): BuiltDevice {
         return buildMotor(spec);
       case "busbar":
         return buildBusbar(spec);
+      case "pot":
+        return buildPot(spec);
+      case "rod":
+        return buildRod(spec);
     }
   })();
   return { ...built, radius: measure(built.group) };
@@ -188,6 +195,7 @@ function buildToroid(spec: Extract<BuildSpec, { kind: "toroid" }>): BuiltDevice 
     ringGeometry(spec.id / 2, spec.od / 2, spec.height),
     coreSurface(spec.coreColor, spec.saturation),
   );
+  core.userData.role = "core";
   group.add(core);
 
   let abbreviated = false;
@@ -204,16 +212,16 @@ function buildToroid(spec: Extract<BuildSpec, { kind: "toroid" }>): BuiltDevice 
       arcStart,
       arc,
     );
-    group.add(
-      new THREE.Mesh(
-        tube(
-          curve,
-          displayWireRadius(winding.wireDiameter, arc * major, turns),
-          turns * TUBE_SEGMENTS_PER_TURN,
-        ),
-        wireSurface(winding.color),
+    const coil = new THREE.Mesh(
+      tube(
+        curve,
+        displayWireRadius(winding.wireDiameter, arc * major, turns),
+        turns * TUBE_SEGMENTS_PER_TURN,
       ),
+      wireSurface(winding.color),
     );
+    coil.userData.role = "winding";
+    group.add(coil);
     arcStart += arc + 0.12;
   }
 
@@ -237,13 +245,23 @@ function buildEi(spec: Extract<BuildSpec, { kind: "ei" }>): BuiltDevice {
   const box = (w: number, h: number, d: number, x: number, y: number) => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material());
     mesh.position.set(x, y, 0);
+    mesh.userData.role = "core";
     return mesh;
   };
 
   const halfHeight = windowHeight / 2 + yoke;
   // E half: back yoke plus three legs.
   group.add(box(outerWidth, yoke, stack, 0, -halfHeight + yoke / 2));
-  group.add(box(tongue, windowHeight, stack, 0, 0));
+  if (spec.roundLeg) {
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(tongue / 2, tongue / 2, windowHeight, 32),
+      material(),
+    );
+    post.userData.role = "core";
+    group.add(post);
+  } else {
+    group.add(box(tongue, windowHeight, stack, 0, 0));
+  }
   group.add(box(yoke, windowHeight, stack, -outerWidth / 2 + yoke / 2, 0));
   group.add(box(yoke, windowHeight, stack, outerWidth / 2 - yoke / 2, 0));
   // I bar on top, lifted by the air gap.
@@ -314,16 +332,16 @@ function buildSolenoid(spec: Extract<BuildSpec, { kind: "solenoid" }>): BuiltDev
     if (turns < winding.turns) abbreviated = true;
     const radius = (spec.bobbinId + spec.bobbinOd) / 4;
     const curve = cylinderHelix(radius, spec.coilLength * 0.94, turns);
-    group.add(
-      new THREE.Mesh(
-        tube(
-          curve,
-          displayWireRadius(winding.wireDiameter, spec.coilLength * 0.94, turns),
-          turns * TUBE_SEGMENTS_PER_TURN,
-        ),
-        wireSurface(winding.color),
+    const coil = new THREE.Mesh(
+      tube(
+        curve,
+        displayWireRadius(winding.wireDiameter, spec.coilLength * 0.94, turns),
+        turns * TUBE_SEGMENTS_PER_TURN,
       ),
+      wireSurface(winding.color),
     );
+    coil.userData.role = "winding";
+    group.add(coil);
   }
 
   if (spec.shellThickness > 0.05) {
@@ -359,7 +377,10 @@ function buildSolenoid(spec: Extract<BuildSpec, { kind: "solenoid" }>): BuiltDev
     ),
     coreMat,
   );
-  plunger.position.y = spec.gap + spec.plungerLength / 2 - spec.coilLength * 0.3;
+  plunger.userData.role = "plunger";
+  plunger.userData.restY = spec.gap + spec.plungerLength / 2 - spec.coilLength * 0.3;
+  plunger.userData.pulledY = plunger.userData.restY - spec.gap;
+  plunger.position.y = plunger.userData.restY;
   group.add(plunger);
 
   const gapMarker = new THREE.Mesh(
@@ -411,16 +432,23 @@ function buildMotor(spec: Extract<BuildSpec, { kind: "motor" }>): BuiltDevice {
       magnetSurface(pole % 2 === 0 ? spec.magnetColor : 0x8b5a5a),
     );
     magnet.position.z = -spec.stackLength / 2;
+    magnet.userData.role = "magnet";
     group.add(magnet);
   }
 
   // Rotor: a slotted cylinder. Each slot is a notch cut by a small box.
+  // Everything that turns goes in one group, so the animator spins one object.
+  const spinner = new THREE.Group();
+  spinner.userData.role = "rotor";
+  group.add(spinner);
+
   const rotor = new THREE.Mesh(
     new THREE.CylinderGeometry(spec.rotorOd / 2, spec.rotorOd / 2, spec.stackLength, 48),
     coreMat,
   );
   rotor.rotation.x = Math.PI / 2;
-  group.add(rotor);
+  rotor.userData.role = "core";
+  spinner.add(rotor);
 
   const slotDepth = spec.rotorOd * 0.16;
   const slotWidth = Math.min((Math.PI * spec.rotorOd) / spec.slots * 0.45, spec.rotorOd * 0.12);
@@ -434,7 +462,8 @@ function buildMotor(spec: Extract<BuildSpec, { kind: "motor" }>): BuiltDevice {
     );
     coil.position.set(radius * Math.cos(angle), radius * Math.sin(angle), 0);
     coil.rotation.z = angle + Math.PI / 2;
-    group.add(coil);
+    coil.userData.role = "winding";
+    spinner.add(coil);
   }
 
   const shaft = new THREE.Mesh(
@@ -447,13 +476,116 @@ function buildMotor(spec: Extract<BuildSpec, { kind: "motor" }>): BuiltDevice {
     plasticSurface(0x9aa3ad),
   );
   shaft.rotation.x = Math.PI / 2;
-  group.add(shaft);
+  spinner.add(shaft);
 
   return {
     group,
     radius: spec.statorOd / 2 + 8,
     turnsAbbreviated: false,
     labels: labelsFor(spec.windings, new THREE.Vector3(spec.rotorOd / 2, 0, 0)),
+  };
+}
+
+// -- pot and rod -----------------------------------------------------------
+
+function buildPot(spec: Extract<BuildSpec, { kind: "pot" }>): BuiltDevice {
+  const group = new THREE.Group();
+  const wall = spec.outerDiameter * 0.12;
+  const material = () => coreSurface(spec.coreColor, spec.saturation);
+
+  // Shell, base and lid: a pot core encloses its winding completely, which is
+  // exactly why it leaks so little.
+  const shell = new THREE.Mesh(
+    ringGeometry(spec.outerDiameter / 2 - wall, spec.outerDiameter / 2, spec.height, 48),
+    material(),
+  );
+  shell.userData.role = "core";
+  group.add(shell);
+  for (const side of [-1, 1]) {
+    const plate = new THREE.Mesh(
+      new THREE.CylinderGeometry(spec.outerDiameter / 2, spec.outerDiameter / 2, wall, 48),
+      material(),
+    );
+    plate.position.y = (side * (spec.height - wall)) / 2;
+    plate.userData.role = "core";
+    group.add(plate);
+  }
+  const post = new THREE.Mesh(
+    new THREE.CylinderGeometry(
+      spec.legDiameter / 2,
+      spec.legDiameter / 2,
+      spec.height - 2 * wall - spec.gap,
+      32,
+    ),
+    material(),
+  );
+  post.position.y = -spec.gap / 2;
+  post.userData.role = "core";
+  group.add(post);
+  if (spec.gap > 0.01) {
+    const marker = new THREE.Mesh(
+      new THREE.CylinderGeometry(spec.legDiameter / 2, spec.legDiameter / 2, Math.max(spec.gap, 0.4), 32),
+      gapSurface(),
+    );
+    marker.position.y = (spec.height - 2 * wall) / 2 - spec.gap / 2;
+    group.add(marker);
+  }
+
+  let abbreviated = false;
+  for (const winding of spec.windings) {
+    const turns = drawnTurns(winding.turns);
+    if (turns < winding.turns) abbreviated = true;
+    const length = spec.height - 2 * wall - 1;
+    const radius = spec.legDiameter / 2 + Math.max(winding.wireDiameter, 1);
+    const coil = new THREE.Mesh(
+      tube(
+        cylinderHelix(radius, length, turns),
+        displayWireRadius(winding.wireDiameter, length, turns),
+        turns * TUBE_SEGMENTS_PER_TURN,
+      ),
+      wireSurface(winding.color),
+    );
+    coil.userData.role = "winding";
+    group.add(coil);
+  }
+  return {
+    group,
+    radius: spec.outerDiameter / 2,
+    turnsAbbreviated: abbreviated,
+    labels: labelsFor(spec.windings, new THREE.Vector3(spec.outerDiameter / 2, 0, 0)),
+  };
+}
+
+function buildRod(spec: Extract<BuildSpec, { kind: "rod" }>): BuiltDevice {
+  const group = new THREE.Group();
+  const rod = new THREE.Mesh(
+    new THREE.CylinderGeometry(spec.diameter / 2, spec.diameter / 2, spec.length, 32),
+    coreSurface(spec.coreColor, spec.saturation),
+  );
+  rod.userData.role = "core";
+  group.add(rod);
+
+  let abbreviated = false;
+  for (const winding of spec.windings) {
+    const turns = drawnTurns(winding.turns);
+    if (turns < winding.turns) abbreviated = true;
+    const length = spec.length * 0.8;
+    const coil = new THREE.Mesh(
+      tube(
+        cylinderHelix(spec.diameter / 2 + winding.wireDiameter, length, turns),
+        displayWireRadius(winding.wireDiameter, length, turns),
+        turns * TUBE_SEGMENTS_PER_TURN,
+      ),
+      wireSurface(winding.color),
+    );
+    coil.userData.role = "winding";
+    group.add(coil);
+  }
+  return {
+    group,
+    radius: spec.length / 2,
+    turnsAbbreviated: abbreviated,
+    labels: labelsFor(spec.windings, new THREE.Vector3(spec.diameter / 2, 0, 0)),
   };
 }
 
@@ -478,6 +610,7 @@ function buildBusbar(spec: Extract<BuildSpec, { kind: "busbar" }>): BuiltDevice 
       material,
     );
     mesh.position.y = (bar - (spec.bars - 1) / 2) * pitch;
+    mesh.userData.role = "winding";
     group.add(mesh);
   }
   // Bolted joints at each end, the part that actually runs hottest.
