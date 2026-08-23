@@ -1,50 +1,52 @@
 /**
  * Steady-state thermal model.
  *
- * Natural convection plus radiation off the outer surface, linearised into a
- * single heat-transfer coefficient. Losses and temperature are coupled --
+ * Heat leaves through whatever cooling the environment provides, plus
+ * radiation when the surface is bare. Losses and temperature are coupled --
  * copper resistance climbs about 0.4 %/K, which raises losses, which raises
  * temperature -- so the operating point is found by iteration rather than by
  * evaluating the losses once at ambient and calling it a day.
  */
 
-import { CELSIUS_AMBIENT } from "./constants";
+import { coolingFor, DEFAULT_ENVIRONMENT, type Environment } from "./environment";
 
 /** Stefan-Boltzmann constant [W/m²K⁴]. */
 const SIGMA = 5.670374e-8;
-/** Emissivity of enamelled wire and painted steel. */
-const EMISSIVITY = 0.9;
-/**
- * Natural-convection coefficient `h = C · dT^0.25` for a small component.
- * C is chosen so that a 100 K rise gives the familiar ~12 W/m²K.
- */
-const CONVECTION_C = 12 / Math.pow(100, 0.25);
-
-/**
- * Combined convection + radiation coefficient at a given rise [W/m²K].
- *
- * A fixed coefficient is fine near 100 K of rise and badly wrong past it:
- * radiation grows as T⁴ and takes over, so a fixed-h model predicts hundreds
- * of degrees where the real part settles far cooler (while still being
- * destroyed -- the warning is not the part that was wrong).
- */
-export function heatTransferCoefficient(rise: number, ambient: number): number {
-  const dT = Math.max(rise, 0.1);
-  const convection = CONVECTION_C * Math.pow(dT, 0.25);
-  const ts = ambient + dT + 273.15;
-  const ta = ambient + 273.15;
-  const radiation =
-    EMISSIVITY * SIGMA * (ts * ts + ta * ta) * (ts + ta);
-  return convection + radiation;
-}
-
-/** Reference coefficient at a 100 K rise, kept for callers that want one. */
-export const H_NATURAL = 12;
 
 export interface ThermalState {
   temperature: number; // [°C]
   rise: number; // [K]
-  totalLoss: number; // [W]
+  /** Average dissipation the cooling has to remove [W]. */
+  totalLoss: number;
+  /** Combined coefficient at the solved operating point [W/m²K]. */
+  coefficient: number;
+  coolingLabel: string;
+}
+
+/**
+ * Combined surface coefficient at a given rise [W/m²K].
+ *
+ * Natural convection grows as the fourth root of the temperature difference
+ * and radiation as T⁴, so a fixed coefficient is fine near 100 K of rise and
+ * badly wrong past it -- it predicts hundreds of degrees where the real part
+ * settles far cooler while still being destroyed.
+ */
+export function heatTransferCoefficient(
+  rise: number,
+  environment: Environment = DEFAULT_ENVIRONMENT,
+): number {
+  const cooling = coolingFor(environment);
+  const dT = Math.max(rise, 0.1);
+  // Forced and liquid cooling are set by the flow, not by how hot the part is.
+  const convection =
+    cooling.medium === "air" && environment.coolingId.startsWith("natural")
+      ? cooling.h * Math.pow(dT / 100, 0.25)
+      : cooling.h;
+  if (!cooling.radiates) return convection * cooling.enclosureFactor;
+  const ts = environment.ambient + dT + 273.15;
+  const ta = environment.ambient + 273.15;
+  const radiation = environment.emissivity * SIGMA * (ts * ts + ta * ta) * (ts + ta);
+  return (convection + radiation) * cooling.enclosureFactor;
 }
 
 /**
@@ -56,11 +58,12 @@ export interface ThermalState {
 export function temperatureRise(
   power: number,
   surface: number,
-  ambient = CELSIUS_AMBIENT,
+  environment: Environment = DEFAULT_ENVIRONMENT,
 ): number {
   if (surface <= 0) return Infinity;
   if (power <= 0) return 0;
-  const dissipated = (dT: number) => heatTransferCoefficient(dT, ambient) * surface * dT;
+  const dissipated = (dT: number) =>
+    heatTransferCoefficient(dT, environment) * surface * dT;
   let lo = 0;
   let hi = 10;
   while (dissipated(hi) < power && hi < 1e5) hi *= 2;
@@ -75,18 +78,20 @@ export function temperatureRise(
 /**
  * Iterate losses and temperature to a fixed point.
  *
- * `lossAt(temperature)` must return the total loss at that temperature.
+ * `lossAt(temperature)` returns the instantaneous loss at that temperature;
+ * the duty cycle decides how much of it the cooling actually has to carry.
  */
 export function solveThermal(
   lossAt: (tempC: number) => number,
   surface: number,
-  ambient = CELSIUS_AMBIENT,
+  environment: Environment = DEFAULT_ENVIRONMENT,
 ): ThermalState {
+  const ambient = environment.ambient;
   let temperature = ambient;
   let loss = 0;
   for (let i = 0; i < 24; i++) {
-    loss = lossAt(temperature);
-    const next = ambient + temperatureRise(loss, surface, ambient);
+    loss = lossAt(temperature) * environment.dutyCycle;
+    const next = ambient + temperatureRise(loss, surface, environment);
     if (!isFinite(next)) break;
     // Damped update: the loop is a positive feedback path and can oscillate.
     const damped = temperature + 0.5 * (next - temperature);
@@ -96,9 +101,12 @@ export function solveThermal(
     }
     temperature = damped;
   }
+  const cooling = coolingFor(environment);
   return {
     temperature,
     rise: temperature - ambient,
     totalLoss: loss,
+    coefficient: heatTransferCoefficient(temperature - ambient, environment),
+    coolingLabel: cooling.label,
   };
 }

@@ -9,7 +9,9 @@ import {
   saturationCurrent,
 } from "../magnetics";
 import { solveThermal } from "../thermal";
+import { environmentParams, readEnvironment } from "../environment";
 import { analyzeWinding } from "../wire";
+import type { RuntimeSpec } from "../run";
 import {
   metric,
   num,
@@ -31,6 +33,12 @@ import {
   thermalWarnings,
   toroidDims,
   windowWarnings,
+  applicationWarnings,
+  bobbinPart,
+  corePart,
+  insulationClassParam,
+  insulationWarnings,
+  windingPart,
 } from "./shared";
 
 export const inductor: DeviceDefinition = {
@@ -61,11 +69,16 @@ export const inductor: DeviceDefinition = {
     { kind: "number", key: "idc", label: "DC 전류", unit: "A", min: 0, max: 200, step: 0.1, default: 3, group: "운전" },
     { kind: "number", key: "ripple", label: "리플 (peak-peak)", unit: "%", min: 0, max: 200, step: 1, default: 30, group: "운전" },
     { kind: "number", key: "freq", label: "스위칭 주파수", unit: "Hz", min: 50, max: 2e6, step: 1, default: 100e3, group: "운전", log: true },
+    { kind: "number", key: "busVoltage", label: "인가 전압 (버스)", unit: "V", min: 1, max: 1500, step: 1, default: 24, group: "운전", hint: "전원을 인가했을 때 전류가 얼마나 빨리 올라오는지를 정합니다." },
+    insulationClassParam(),
+    ...environmentParams(),
   ],
   simulate,
 };
 
 function simulate(values: ParamValues): DeviceResult {
+  const environment = readEnvironment(values);
+  const insulationClass = Number(values["insulationClass"]) || 155;
   const core = coreMaterial(str(values, "coreMaterial"));
   const conductor = conductorMaterial(str(values, "conductor"));
   const shape = str(values, "shape");
@@ -118,7 +131,7 @@ function simulate(values: ParamValues): DeviceResult {
     return copper + iron;
   };
 
-  const thermal = solveThermal(lossAt, metrics.surface);
+  const thermal = solveThermal(lossAt, metrics.surface, environment);
   const winding = analyzeWinding({
     material: conductor,
     turns,
@@ -191,6 +204,11 @@ function simulate(values: ParamValues): DeviceResult {
     });
   }
 
+  warnings.push(
+    ...insulationWarnings(values, thermal.temperature),
+    ...applicationWarnings(values, out, op.saturationRatio),
+  );
+
   const curveMax = Math.max(isat * 1.8, iPeak * 1.4, 0.1);
   const curves: Curve[] = [
     {
@@ -234,5 +252,25 @@ function simulate(values: ParamValues): DeviceResult {
           ],
         });
 
-  return { metrics: out, warnings, curves, build };
+  const runtime: RuntimeSpec = {
+    kind: "rl",
+    // An inductor lives inside a converter that holds the current, so extra
+    // resistance from heating becomes heat, not less current.
+    drive: "current",
+    supply: num(values, "busVoltage"),
+    ratedCurrent: iPeak,
+    resistance20: winding.rdc / (1 + conductor.alphaT * (thermal.temperature - 20)),
+    alphaT: conductor.alphaT,
+    inductance: Math.max(op.inductance, 1e-9),
+    fixedLoss: coreLoss,
+    surface: metrics.surface,
+    saturationCurrent: isat,
+    parts: [
+      windingPart(winding.mass, insulationClass, conductor),
+      corePart(core, metrics.mass),
+      bobbinPart(metrics.mass * 0.05),
+    ],
+  };
+
+  return { metrics: out, warnings, curves, build, runtime };
 }

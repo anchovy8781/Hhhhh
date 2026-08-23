@@ -138,6 +138,8 @@ export function buildDevice(spec: BuildSpec): BuiltDevice {
         return buildSolenoid(spec);
       case "motor":
         return buildMotor(spec);
+      case "busbar":
+        return buildBusbar(spec);
     }
   })();
   return { ...built, radius: measure(built.group) };
@@ -452,6 +454,52 @@ function buildMotor(spec: Extract<BuildSpec, { kind: "motor" }>): BuiltDevice {
     radius: spec.statorOd / 2 + 8,
     turnsAbbreviated: false,
     labels: labelsFor(spec.windings, new THREE.Vector3(spec.rotorOd / 2, 0, 0)),
+  };
+}
+
+// -- busbar ----------------------------------------------------------------
+
+function buildBusbar(spec: Extract<BuildSpec, { kind: "busbar" }>): BuiltDevice {
+  const group = new THREE.Group();
+  const surface = spec.finish === "black" ? 0x22262b : spec.color;
+  const material = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(surface).lerp(
+      new THREE.Color(0xff3b30),
+      Math.min(Math.max(spec.loading - 0.7, 0) / 0.5, 1) * 0.8,
+    ),
+    metalness: spec.finish === "black" ? 0.2 : 0.9,
+    roughness: spec.finish === "black" ? 0.8 : 0.25,
+  });
+  // Stacked bars sit one gap apart, which is what shades them thermally.
+  const pitch = spec.thickness * 2.2;
+  for (let bar = 0; bar < spec.bars; bar++) {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(spec.length, spec.thickness, spec.width),
+      material,
+    );
+    mesh.position.y = (bar - (spec.bars - 1) / 2) * pitch;
+    group.add(mesh);
+  }
+  // Bolted joints at each end, the part that actually runs hottest.
+  for (const side of [-1, 1]) {
+    for (let bar = 0; bar < spec.bars; bar++) {
+      const bolt = new THREE.Mesh(
+        new THREE.CylinderGeometry(spec.width * 0.12, spec.width * 0.12, spec.thickness * 1.6, 16),
+        plasticSurface(0x8a929b),
+      );
+      bolt.position.set(
+        (side * spec.length) / 2.4,
+        (bar - (spec.bars - 1) / 2) * pitch,
+        0,
+      );
+      group.add(bolt);
+    }
+  }
+  return {
+    group,
+    radius: spec.length / 2,
+    turnsAbbreviated: false,
+    labels: [],
   };
 }
 

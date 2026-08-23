@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEVICES, defaultValues } from "../src/physics/index";
+import { buildSaturation } from "../src/physics/types";
 import { PRESETS } from "../src/ui/presets";
 
 /**
@@ -18,7 +19,7 @@ describe("shipped starting points", () => {
 
     it(`${definition.name}의 기본값이 포화하지 않는다`, () => {
       const result = definition.simulate(defaultValues(definition));
-      expect(result.build.saturation).toBeLessThan(0.85);
+      expect(buildSaturation(result.build)).toBeLessThan(0.85);
     });
 
     for (const preset of PRESETS[definition.id] ?? []) {
@@ -29,7 +30,7 @@ describe("shipped starting points", () => {
         });
         const errors = result.warnings.filter((w) => w.level === "error");
         expect(errors.map((e) => e.text)).toEqual([]);
-        expect(result.build.saturation).toBeLessThan(1);
+        expect(buildSaturation(result.build)).toBeLessThan(1);
       });
     }
   }

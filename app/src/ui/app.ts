@@ -9,12 +9,21 @@ import type {
   ParamGroup,
   ParamValues,
 } from "../physics/types";
+import {
+  CATALOG_BY_KIND,
+  searchCatalog,
+  type CatalogKind,
+  type IndexedItem,
+} from "../physics/catalog/index";
+import { applicationValues } from "../physics/applications";
+import { readEnvironment } from "../physics/environment";
+import { formatTime, runDevice, type RunResult } from "../physics/run";
 import { buildDevice } from "../view3d/builders";
 import { clearGroup, createViewer, type Viewer } from "../view3d/scene";
 import { drawCurve } from "./chart";
 import { PRESETS } from "./presets";
 
-const GROUPS: ParamGroup[] = ["재료", "치수", "권선", "운전"];
+const GROUPS: ParamGroup[] = ["재료", "치수", "권선", "운전", "환경"];
 
 const el = <T extends HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -64,6 +73,13 @@ export function startApp(): void {
     viewer.setCutaway(on);
   });
 
+  el<HTMLButtonElement>("picker-close").addEventListener("click", closePicker);
+  el("picker").addEventListener("click", (event) => {
+    if (event.target === el("picker")) closePicker();
+  });
+
+  el<HTMLButtonElement>("energise").addEventListener("click", energise);
+
   el<HTMLButtonElement>("reset").addEventListener("click", () => {
     values = defaultValues(current);
     renderControls();
@@ -106,7 +122,13 @@ export function startApp(): void {
     host.replaceChildren();
     for (const param of current.params) {
       if (param.group !== activeGroup) continue;
-      host.append(param.kind === "number" ? numberControl(param) : choiceControl(param));
+      host.append(
+        param.kind === "number"
+          ? numberControl(param)
+          : param.kind === "choice"
+            ? choiceControl(param)
+            : catalogControl(param),
+      );
     }
   }
 
@@ -144,6 +166,38 @@ export function startApp(): void {
       update(false);
     });
     input.addEventListener("change", () => update(true));
+
+    // Tapping the readout swaps it for a text field: sliders are for
+    // exploring, typing is for the value you already decided on.
+    readout.title = "정확한 값을 입력하려면 누르세요";
+    readout.addEventListener("click", () => {
+      const field = document.createElement("input");
+      field.type = "number";
+      field.className = "readout-input";
+      field.value = String(values[param.key]);
+      field.min = String(param.min);
+      field.max = String(param.max);
+      field.step = String(param.step);
+      const commit = () => {
+        const typed = Number(field.value);
+        if (Number.isFinite(typed)) {
+          const clamped = Math.min(Math.max(typed, param.min), param.max);
+          values[param.key] = clamped;
+          input.value = String(toSlider(clamped));
+          show(clamped);
+          update(true);
+        }
+        field.replaceWith(readout);
+      };
+      field.addEventListener("blur", commit);
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") field.blur();
+        if (event.key === "Escape") field.replaceWith(readout);
+      });
+      readout.replaceWith(field);
+      field.focus();
+      field.select();
+    });
 
     const row = document.createElement("div");
     row.className = "row";
@@ -190,12 +244,130 @@ export function startApp(): void {
 
     select.addEventListener("change", () => {
       values[param.key] = select.value;
+      // Choosing an application is choosing where the device runs, so it
+      // carries its own ambient, cooling and enclosure with it.
+      if (param.key === "app.profile") {
+        Object.assign(values, applicationValues(select.value));
+        renderControls();
+      }
       showNote();
       update(true);
     });
 
     wrap.append(row, select, hint);
     return wrap;
+  }
+
+  function catalogControl(param: Extract<Param, { kind: "catalog" }>): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "control";
+    const row = document.createElement("div");
+    row.className = "row";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = param.label;
+    row.append(name);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "catalog-pick";
+    const current = findItem(param.catalog as CatalogKind, String(values[param.key]));
+    button.innerHTML = `${current?.name ?? String(values[param.key])}<span class="cp-summary">${current?.summary ?? ""}</span>`;
+    button.addEventListener("click", () => openPicker(param));
+
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = current?.note ?? param.hint ?? "";
+
+    wrap.append(row, button, hint);
+    return wrap;
+  }
+
+  function findItem(kind: CatalogKind, id: string): IndexedItem | undefined {
+    return (CATALOG_BY_KIND[kind] ?? []).find((item) => item.id === id);
+  }
+
+  /**
+   * The searchable material picker.
+   *
+   * With over a thousand entries the only workable control is search, so the
+   * sheet opens focused on the box and narrows as you type. Suggested tags are
+   * the shortcuts for the searches this particular parameter usually wants.
+   */
+  function openPicker(param: Extract<Param, { kind: "catalog" }>) {
+    const sheet = el("picker");
+    const search = el<HTMLInputElement>("picker-search");
+    const list = el("picker-list");
+    const tags = el("picker-tags");
+    const count = el("picker-count");
+    const kind = param.catalog as CatalogKind;
+    const selected = String(values[param.key]);
+
+    const render = () => {
+      const found = searchCatalog(search.value, { kind, limit: 80 });
+      const total = (CATALOG_BY_KIND[kind] ?? []).length;
+      count.textContent = search.value.trim()
+        ? `${total}개 중 ${found.length}개 (상위 80개까지 표시)`
+        : `${total}개 · 이름·등급·용도로 검색하세요`;
+      list.replaceChildren();
+      for (const item of found) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "picker-item";
+        if (item.id === selected) button.setAttribute("aria-current", "true");
+        button.innerHTML =
+          `<div class="pi-name">${item.name}</div>` +
+          `<div class="pi-summary">${item.summary}</div>` +
+          `<div class="pi-note">${item.note}</div>` +
+          `<span class="pi-src">${item.family} · 근거: ${item.provenance}</span>`;
+        button.addEventListener("click", () => {
+          values[param.key] = item.id;
+          closePicker();
+          renderControls();
+          update(true);
+        });
+        list.append(button);
+      }
+    };
+
+    tags.replaceChildren();
+    const suggestions = param.suggestedTags ?? defaultTags(kind);
+    for (const tag of suggestions) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "picker-tag";
+      chip.textContent = tag;
+      chip.addEventListener("click", () => {
+        search.value = tag;
+        render();
+      });
+      tags.append(chip);
+    }
+
+    search.value = "";
+    search.oninput = render;
+    render();
+    sheet.hidden = false;
+    search.focus();
+  }
+
+  function closePicker() {
+    el("picker").hidden = true;
+  }
+
+  function defaultTags(kind: CatalogKind): string[] {
+    switch (kind) {
+      case "core":
+        return ["페라이트", "규소강", "분말코어", "나노결정", "고주파", "저손실", "고포화"];
+      case "conductor":
+        return ["구리", "알루미늄", "리츠", "포일", "저가", "고주파"];
+      case "magnet":
+        return ["네오디뮴", "페라이트자석", "smco", "고온", "저가"];
+      case "coolant":
+        return ["자연", "강제", "수냉", "유입", "밀폐", "고방열"];
+      default:
+        return [];
+    }
   }
 
   function renderPresets() {
@@ -222,6 +394,13 @@ export function startApp(): void {
     } catch (error) {
       showFailure(error);
       return;
+    }
+    const button = el<HTMLButtonElement>("energise");
+    if (button.dataset.state) {
+      // The design moved, so the previous run no longer describes it.
+      delete button.dataset.state;
+      button.textContent = "⚡ 전원 인가하고 돌려보기";
+      el("run-report").hidden = true;
     }
     renderHeadline(result);
     renderWarnings(result);
@@ -256,11 +435,12 @@ export function startApp(): void {
       badge.textContent = text;
       host.append(badge);
     };
-    const saturation = result.build.saturation;
+    const build = result.build as { saturation?: number; windings?: { label: string; turns: number; wireDiameter: number }[] };
+    const saturation = build.saturation ?? 0;
     if (saturation > 0.999) add("포화", true);
     else if (saturation > 0.85) add(`자속 ${Math.round(saturation * 100)}%`, true);
     else if (saturation > 0) add(`자속 ${Math.round(saturation * 100)}%`);
-    for (const winding of result.build.windings) {
+    for (const winding of build.windings ?? []) {
       add(`${winding.label} ${winding.turns}T · ⌀${winding.wireDiameter.toFixed(2)}mm`);
     }
     if (abbreviated) add("권선은 일부만 표시");
@@ -330,6 +510,125 @@ export function startApp(): void {
     }
   }
 
+  const PART_LABELS: Record<string, string> = {
+    winding: "권선",
+    core: "코어",
+    magnet: "영구자석",
+    insulation: "절연물",
+    bobbin: "보빈",
+    housing: "하우징",
+    supply: "전원",
+  };
+
+  /**
+   * Apply power and report what happened.
+   *
+   * The static panel answers "what does this settle at"; this answers "does it
+   * get there", which is a different question whenever an inrush, a
+   * temperature limit or a magnet's grade is involved.
+   */
+  function energise() {
+    const button = el<HTMLButtonElement>("energise");
+    const report = el("run-report");
+    let result: DeviceResult;
+    try {
+      result = current.simulate(values);
+    } catch (error) {
+      showFailure(error);
+      return;
+    }
+    if (!result.runtime) {
+      report.hidden = false;
+      report.textContent = "이 장치는 아직 전원 인가 시뮬레이션을 지원하지 않습니다.";
+      return;
+    }
+
+    const run = runDevice(result.runtime, readEnvironment(values), { duration: 1800 });
+    renderRun(run, result);
+    button.dataset.state = run.verdict;
+    button.textContent =
+      run.verdict === "ok"
+        ? "⚡ 30분 연속 운전 통과 — 다시 돌려보기"
+        : run.verdict === "warn"
+          ? "⚠ 한계에 근접했습니다 — 아래 확인"
+          : "⛔ 운전 중 고장 — 아래 확인";
+  }
+
+  function renderRun(run: RunResult, result: DeviceResult) {
+    const report = el("run-report");
+    report.hidden = false;
+    report.replaceChildren();
+
+    const verdict = document.createElement("div");
+    verdict.className = `run-verdict ${run.verdict}`;
+    verdict.textContent =
+      run.verdict === "fail"
+        ? `${formatTime(run.failedAt ?? 0)} 만에 ${PART_LABELS[run.failedPart ?? ""] ?? "부품"}이(가) 고장났습니다`
+        : run.verdict === "warn"
+          ? "30분 운전은 버텼지만 여유가 없습니다"
+          : "30분 연속 운전, 이상 없음";
+    report.append(verdict);
+
+    const stats = document.createElement("div");
+    stats.className = "run-stats";
+    const addStat = (label: string, value: string) => {
+      const k = document.createElement("div");
+      k.className = "k";
+      k.textContent = label;
+      const v = document.createElement("div");
+      v.className = "v";
+      v.textContent = value;
+      stats.append(k, v);
+    };
+    addStat("돌입 최대 전류", `${run.peakCurrent.toFixed(2)} A`);
+    addStat("정상 전류", `${run.steadyCurrent.toFixed(2)} A`);
+    addStat("전류 상승 시간", formatTime(run.currentRise));
+    for (const part of result.runtime!.parts) {
+      const temp = run.finalTemperatures[part.id];
+      if (temp === undefined) continue;
+      addStat(`${part.label} 최종 온도`, `${temp.toFixed(0)} °C / 한계 ${part.limit}°C`);
+    }
+    report.append(stats);
+
+    for (const event of run.events) {
+      const box = document.createElement("div");
+      box.className = `run-event ${event.level}`;
+      box.innerHTML =
+        `<div class="re-title">${event.title}` +
+        `<span class="re-part">${PART_LABELS[event.partId] ?? event.partId}</span></div>` +
+        `<div>${event.text}</div>` +
+        `<div class="re-advice">→ ${event.advice}</div>`;
+      report.append(box);
+    }
+
+    const currentCurve = {
+      key: "run-current",
+      title: "전원 인가 직후 전류",
+      xLabel: "시간 [ms]",
+      yLabel: "전류 [A]",
+      points: run.electrical.map((sample) => ({ x: sample.t * 1e3, y: sample.current })),
+    };
+    const tempCurve = {
+      key: "run-temp",
+      title: "운전 시간에 따른 권선 온도",
+      xLabel: "시간 [분]",
+      yLabel: "온도 [°C]",
+      points: run.thermal.map((sample) => ({
+        x: sample.t / 60,
+        y: sample.temperatures.winding ?? sample.temperatures.core ?? 0,
+      })),
+    };
+    for (const curve of [currentCurve, tempCurve]) {
+      const title = document.createElement("div");
+      title.className = "chart-title";
+      title.textContent = curve.title;
+      const canvas = document.createElement("canvas");
+      canvas.className = "chart";
+      report.append(title, canvas);
+      requestAnimationFrame(() => drawCurve(canvas, curve));
+    }
+  }
+
   function showFailure(error: unknown) {
     const host = el("warnings");
     host.replaceChildren();
@@ -356,6 +655,18 @@ export function startApp(): void {
       update(true);
     },
     result: () => current.simulate(values),
+    energise: () => {
+      const built = current.simulate(values);
+      return built.runtime
+        ? runDevice(built.runtime, readEnvironment(values), { duration: 1800 })
+        : null;
+    },
+    search: (query: string, kind: string) =>
+      searchCatalog(query, { kind: kind as CatalogKind, limit: 20 }).map((i) => i.id),
+    openPickerFor: (key: string) => {
+      const param = current.params.find((p) => p.key === key);
+      if (param && param.kind === "catalog") openPicker(param);
+    },
     /**
      * Render and read the framebuffer in one synchronous task.
      *

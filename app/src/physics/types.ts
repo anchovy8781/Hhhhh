@@ -1,6 +1,6 @@
 /** Shared vocabulary between the physics models, the UI and the 3D view. */
 
-export type ParamGroup = "재료" | "치수" | "권선" | "운전";
+export type ParamGroup = "재료" | "치수" | "권선" | "운전" | "환경";
 
 export interface NumberParam {
   kind: "number";
@@ -27,7 +27,27 @@ export interface ChoiceParam {
   hint?: string;
 }
 
-export type Param = NumberParam | ChoiceParam;
+/**
+ * A pick from the material catalog.
+ *
+ * Once a catalog has 161 core materials and 571 wires, a dropdown stops being
+ * a control and becomes an obstacle, so these render as a searchable picker
+ * instead of carrying their options inline.
+ */
+export interface CatalogParam {
+  kind: "catalog";
+  key: string;
+  label: string;
+  /** Which section of the catalog to search. */
+  catalog: string;
+  default: string;
+  group: ParamGroup;
+  hint?: string;
+  /** Tags that pre-filter the list, e.g. only common-mode choke cores. */
+  suggestedTags?: string[];
+}
+
+export type Param = NumberParam | ChoiceParam | CatalogParam;
 export type ParamValues = Record<string, number | string>;
 
 export type MetricTone = "good" | "warn" | "bad" | "plain";
@@ -95,6 +115,17 @@ export type BuildSpec =
       saturation: number;
     }
   | {
+      kind: "busbar";
+      width: number;
+      thickness: number;
+      length: number;
+      bars: number;
+      color: number;
+      finish: string;
+      /** Fraction of ampacity in use; tints the bar as it approaches 1. */
+      loading: number;
+    }
+  | {
       kind: "motor";
       statorOd: number;
       rotorOd: number;
@@ -119,11 +150,18 @@ export interface WindingVisual {
   share: number;
 }
 
+/** Saturation of a build spec, or 0 for devices that have no magnetic core. */
+export function buildSaturation(build: BuildSpec): number {
+  return "saturation" in build ? build.saturation : 0;
+}
+
 export interface DeviceResult {
   metrics: Metric[];
   warnings: Warning[];
   curves: Curve[];
   build: BuildSpec;
+  /** Everything needed to energise this design and watch it run. */
+  runtime?: import("./run").RuntimeSpec;
 }
 
 export interface DeviceDefinition {

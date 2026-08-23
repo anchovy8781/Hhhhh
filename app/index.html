@@ -38,6 +38,10 @@
 
         <section class="panel">
           <div id="headline" class="headline"></div>
+          <button id="energise" class="energise" type="button">
+            ⚡ 전원 인가하고 돌려보기
+          </button>
+          <div id="run-report" class="run-report" hidden></div>
           <div id="warnings" class="warnings"></div>
 
           <div class="group-tabs" id="group-tabs" role="tablist"></div>
@@ -62,6 +66,25 @@
         </section>
       </main>
     </div>
+
+    <div id="picker" class="picker" hidden>
+      <div class="picker-sheet">
+        <header class="picker-head">
+          <input
+            id="picker-search"
+            class="picker-search"
+            type="search"
+            placeholder="재료 검색 — 이름, 등급, 용도"
+            autocomplete="off"
+          />
+          <button id="picker-close" class="picker-close" type="button">닫기</button>
+        </header>
+        <div id="picker-tags" class="picker-tags"></div>
+        <div id="picker-count" class="picker-count"></div>
+        <div id="picker-list" class="picker-list"></div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

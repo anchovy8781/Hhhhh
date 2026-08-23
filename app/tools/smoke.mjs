@@ -12,7 +12,15 @@ import { chromium } from "playwright";
 
 const PORT = 4173;
 const OUT = "screenshots";
-const DEVICES = ["inductor", "transformer", "solenoid", "motor"];
+const DEVICES = [
+  "inductor",
+  "transformer",
+  "cmchoke",
+  "solenoid",
+  "motor",
+  "bldc",
+  "busbar",
+];
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -103,7 +111,7 @@ try {
   // Exercise every parameter group tab and a slider drag on the first device.
   await page.evaluate(() => window.__lab.setDevice("inductor"));
   await wait(400);
-  for (const group of ["재료", "치수", "권선", "운전"]) {
+  for (const group of ["재료", "치수", "권선", "운전", "환경"]) {
     const tab = page.locator(".group-tab", { hasText: group });
     if ((await tab.count()) > 0) {
       await tab.first().click();
@@ -141,6 +149,72 @@ try {
     return problems;
   });
   failures.push(...presetErrors.map((p) => `프리셋이 한계를 넘습니다 -- ${p}`));
+
+  // The searchable picker must open, filter and apply a selection.
+  await page.evaluate(() => window.__lab.setDevice("inductor"));
+  await wait(400);
+  await page.evaluate(() => window.__lab.openPickerFor("coreMaterial"));
+  await wait(300);
+  if (await page.locator("#picker").isHidden()) {
+    failures.push("재료 검색창이 열리지 않았습니다");
+  } else {
+    const before = await page.locator(".picker-item").count();
+    await page.fill("#picker-search", "나노결정");
+    await wait(300);
+    const after = await page.locator(".picker-item").count();
+    if (!(after > 0 && after < before)) {
+      failures.push(`검색이 목록을 좁히지 못했습니다 (${before} -> ${after})`);
+    }
+    await page.screenshot({ path: `${OUT}/picker.png` });
+    await page.locator(".picker-item").first().click();
+    await wait(400);
+    const picked = await page.evaluate(() => window.__lab.result().metrics.length);
+    if (!(picked > 0)) failures.push("재료를 고른 뒤 계산이 되지 않았습니다");
+    if (await page.locator("#picker").isVisible()) {
+      failures.push("재료를 고른 뒤에도 검색창이 닫히지 않았습니다");
+    }
+  }
+
+  // Energising must produce a verdict, a timeline and traces.
+  for (const id of DEVICES) {
+    const run = await page.evaluate((deviceId) => {
+      window.__lab.setDevice(deviceId);
+      return window.__lab.energise();
+    }, id);
+    if (!run) {
+      failures.push(`${id}: 전원 인가 시뮬레이션이 없습니다`);
+      continue;
+    }
+    if (!(run.thermal.length > 10 && run.electrical.length > 10)) {
+      failures.push(`${id}: 전원 인가 결과에 파형이 없습니다`);
+    }
+    if (!["ok", "warn", "fail"].includes(run.verdict)) {
+      failures.push(`${id}: 판정이 이상합니다 (${run.verdict})`);
+    }
+    for (const event of run.events) {
+      if (!event.advice) failures.push(`${id}: 고장 안내에 조치 방법이 없습니다`);
+    }
+  }
+
+  // A deliberately overdriven design must name the part that fails.
+  await page.evaluate(() => {
+    window.__lab.setDevice("solenoid");
+    window.__lab.setValue("voltage", 45);
+    window.__lab.setValue("awg", 28);
+    window.__lab.setValue("turns", 1800);
+  });
+  await wait(400);
+  await page.locator("#energise").click();
+  await wait(700);
+  const reportText = await page.locator("#run-report").innerText();
+  if (!/고장|한계/.test(reportText)) {
+    failures.push(`과부하 설계인데 고장을 알리지 않았습니다: ${reportText.slice(0, 80)}`);
+  }
+  const verdictState = await page.locator("#energise").getAttribute("data-state");
+  if (verdictState !== "fail") {
+    failures.push(`과부하 설계의 판정이 fail이 아닙니다 (${verdictState})`);
+  }
+  await page.screenshot({ path: `${OUT}/run-failure.png` });
 
   // Desktop layout.
   await page.setViewportSize({ width: 1280, height: 800 });

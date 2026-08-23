@@ -1,4 +1,4 @@
-/** 브러시 DC 모터 (영구자석 계자) 모델. */
+/** BLDC 모터 (3상 전자 정류, 영구자석 회전자) 모델. */
 
 import {
   conductorMaterial,
@@ -37,11 +37,11 @@ import {
 
 const RPM_PER_RAD = 60 / (2 * Math.PI);
 
-export const motor: DeviceDefinition = {
-  id: "motor",
-  name: "DC 모터",
-  tagline: "자석의 자속과 전기자 전류가 만나 토크가 됩니다",
-  icon: "⊛",
+export const bldc: DeviceDefinition = {
+  id: "bldc",
+  name: "BLDC 모터",
+  tagline: "브러시 없이 전자 정류로 돌립니다. 같은 크기에서 더 효율적입니다",
+  icon: "✳",
   params: [
     magnetParam(),
     coreMaterialParam("coreMaterial", "steel-m19-035"),
@@ -57,7 +57,7 @@ export const motor: DeviceDefinition = {
     { kind: "number", key: "awg", label: "전선 굵기", unit: "AWG", min: 8, max: 40, step: 1, default: 22, group: "권선" },
     { kind: "number", key: "voltage", label: "인가 전압", unit: "V", min: 1, max: 800, step: 1, default: 24, group: "운전" },
     { kind: "number", key: "loadTorque", label: "부하 토크", unit: "N·m", min: 0, max: 50, step: 0.01, default: 0.15, group: "운전" },
-    { kind: "number", key: "brushDrop", label: "브러시 전압강하", unit: "V", min: 0, max: 5, step: 0.1, default: 1.5, group: "운전", hint: "탄소 브러시 2개 합계. 저전압 모터에서는 효율을 크게 갉아먹습니다." },
+    { kind: "number", key: "switchDrop", label: "인버터 전압강하", unit: "V", min: 0, max: 4, step: 0.05, default: 0.7, group: "운전", hint: "MOSFET 두 개를 지나는 도통 손실. 브러시보다 훨씬 작습니다." },
     insulationClassParam(),
     ...environmentParams(),
   ],
@@ -81,7 +81,7 @@ function simulate(values: ParamValues): DeviceResult {
   const awg = Math.round(num(values, "awg"));
   const voltage = num(values, "voltage");
   const loadTorque = num(values, "loadTorque");
-  const brushDrop = Math.min(num(values, "brushDrop"), voltage);
+  const brushDrop = Math.min(num(values, "switchDrop"), voltage);
 
   // Air-gap flux density from the magnet's load line: the magnet works
   // against its own internal reluctance plus the gap it has to push through.
@@ -106,9 +106,10 @@ function simulate(values: ParamValues): DeviceResult {
   const fluxPerPole = Math.min(fluxUnlimited, fluxCeiling);
   const bGapEffective = polePitchArea > 0 ? fluxPerPole / polePitchArea : 0;
 
-  // Lap winding: parallel paths a = poles, total conductors z = 2*N*slots.
+  // Three-phase wye with 120 degree conduction: two phases carry current at
+  // any instant, so only two thirds of the conductors are producing torque.
   const conductors = 2 * turnsPerCoil * slots;
-  const kt = (conductors * poles * fluxPerPole) / (2 * Math.PI * poles);
+  const kt = ((conductors * poles * fluxPerPole) / (2 * Math.PI * poles)) * (2 / 3);
   const ke = kt; // SI 단위에서 토크상수와 역기전력상수는 같습니다
 
   const meanTurnLength = 2 * (stackLength + (Math.PI * rotorOd) / poles);
@@ -124,7 +125,8 @@ function simulate(values: ParamValues): DeviceResult {
       freq: 0,
       tempC,
     });
-    const resistance = (winding.rdc * 4) / (poles * poles); // 병렬 경로 보정
+    // Line-to-line resistance: two phases in series out of three.
+  const resistance = (winding.rdc * 2) / 3;
     const current = kt > 0 ? loadTorque / kt : 0;
     return current * current * resistance;
   };
@@ -196,7 +198,7 @@ function simulate(values: ParamValues): DeviceResult {
     metric("current", "동작 전류", current, si(current, "A"), "plain", { headline: true }),
     metric("noload", "무부하 속도", noLoadSpeed * RPM_PER_RAD, `${(noLoadSpeed * RPM_PER_RAD).toFixed(0)} rpm`),
     metric("stallT", "기동 토크", stallTorque, si(stallTorque, "N·m")),
-    metric("stallI", "기동 전류", stallCurrent, si(stallCurrent, "A"),
+    metric("stallI", "구속 전류", stallCurrent, si(stallCurrent, "A"),
       stallCurrent > 100 ? "warn" : "plain", { hint: "정지 상태에서 흐르는 전류입니다. 인러시 대책이 필요합니다." }),
     metric("pmax", "최대 기계 출력", maxPower, si(maxPower, "W")),
     metric("pmech", "출력", mechanical, si(mechanical, "W")),
@@ -208,12 +210,12 @@ function simulate(values: ParamValues): DeviceResult {
     metric("flux", "극당 자속", fluxPerPole, si(fluxPerPole, "Wb")),
     metric("byoke", "요크 자속밀도", bYoke, `${bYoke.toFixed(3)} T`,
       saturationRatio > 0.95 ? "bad" : saturationRatio > 0.8 ? "warn" : "good"),
-    metric("res", "전기자 저항", resistance, si(resistance, "Ω")),
+    metric("res", "상간 저항", resistance, si(resistance, "Ω")),
     metric("pcu", "구리손", copperLoss, si(copperLoss, "W")),
     metric("pfe", "회전자 철손", ironLoss, si(ironLoss, "W"), "plain", {
       hint: "속도가 오를수록 커집니다. 코어 재료를 바꾸면 바로 드러납니다.",
     }),
-    metric("pbrush", "브러시 손실", brushLoss, si(brushLoss, "W"),
+    metric("pbrush", "인버터 도통 손실", brushLoss, si(brushLoss, "W"),
       brushLoss > mechanical * 0.2 && mechanical > 0 ? "warn" : "plain"),
     metric("temp", "예상 온도", thermal.temperature, `${thermal.temperature.toFixed(0)} °C`,
       thermal.temperature > magnet.maxTemp ? "bad" : thermal.temperature > magnet.maxTemp * 0.8 ? "warn" : "good"),
@@ -243,6 +245,10 @@ function simulate(values: ParamValues): DeviceResult {
       text: `고정자 요크가 포화해 자속이 ${((1 - fluxPerPole / fluxUnlimited) * 100).toFixed(0)}% 잘렸습니다. 요크를 ${needed.toFixed(1)}mm 이상으로 키우면 자석 성능을 다 씁니다.`,
     });
   }
+  warnings.push({
+    level: "info",
+    text: "BLDC는 브러시 마모가 없어 수명이 베어링으로 결정됩니다. 대신 위치 센서나 센서리스 제어기가 필요합니다.",
+  });
   if (airGap > 1e-3) {
     warnings.push({
       level: "info",
@@ -254,7 +260,7 @@ function simulate(values: ParamValues): DeviceResult {
   if (armatureH > magnet.hc * 0.5) {
     warnings.push({
       level: "warn",
-      text: `전기자 반작용이 자석 보자력의 ${((armatureH / magnet.hc) * 100).toFixed(0)}%에 달합니다. 감자 위험이 있습니다.`,
+      text: `전기자 반작용(고정자 기자력)이 자석 보자력의 ${((armatureH / magnet.hc) * 100).toFixed(0)}%에 달합니다. 감자 위험이 있습니다.`,
     });
   }
 

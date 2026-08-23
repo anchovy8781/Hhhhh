@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEVICES, defaultValues, device } from "../src/physics";
+import { CATALOG_BY_KIND, type CatalogKind } from "../src/physics/catalog/index";
 import type { Metric, ParamValues } from "../src/physics/types";
 
 const get = (metrics: Metric[], key: string): number => {
@@ -14,9 +15,9 @@ const run = (id: string, overrides: ParamValues = {}) => {
 };
 
 describe("device registry", () => {
-  it("exposes four devices with unique ids", () => {
-    expect(DEVICES).toHaveLength(4);
-    expect(new Set(DEVICES.map((d) => d.id)).size).toBe(4);
+  it("exposes every device under a unique id", () => {
+    expect(DEVICES.length).toBeGreaterThanOrEqual(5);
+    expect(new Set(DEVICES.map((d) => d.id)).size).toBe(DEVICES.length);
   });
 
   it("simulates every device at its defaults without throwing", () => {
@@ -34,8 +35,11 @@ describe("device registry", () => {
         if (param.kind === "number") {
           expect(param.default).toBeGreaterThanOrEqual(param.min);
           expect(param.default).toBeLessThanOrEqual(param.max);
-        } else {
+        } else if (param.kind === "choice") {
           expect(param.options.map((o) => o.value)).toContain(param.default);
+        } else {
+          const pool = CATALOG_BY_KIND[param.catalog as CatalogKind] ?? [];
+          expect(pool.map((item) => item.id)).toContain(param.default);
         }
       }
     }

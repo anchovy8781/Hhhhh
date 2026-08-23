@@ -4,6 +4,7 @@ import { MU0, bisect } from "../constants";
 import { conductorMaterial, coreMaterial } from "../materials";
 import { coreFieldStrength } from "../magnetics";
 import { solveThermal } from "../thermal";
+import { environmentParams, readEnvironment } from "../environment";
 import { analyzeWinding } from "../wire";
 import {
   metric,
@@ -17,7 +18,17 @@ import {
   type ParamValues,
   type Warning,
 } from "../types";
-import { conductorParam, coreMaterialParam } from "./shared";
+import type { RuntimeSpec } from "../run";
+import {
+  applicationWarnings,
+  bobbinPart,
+  corePart,
+  windingPart,
+  conductorParam,
+  coreMaterialParam,
+  insulationClassParam,
+  insulationWarnings,
+} from "./shared";
 
 export const solenoid: DeviceDefinition = {
   id: "solenoid",
@@ -35,12 +46,15 @@ export const solenoid: DeviceDefinition = {
     { kind: "number", key: "turns", label: "턴수", unit: "T", min: 10, max: 20000, step: 10, default: 2200, group: "권선" },
     { kind: "number", key: "awg", label: "전선 굵기", unit: "AWG", min: 8, max: 40, step: 1, default: 30, group: "권선" },
     { kind: "number", key: "voltage", label: "인가 전압 (DC)", unit: "V", min: 1, max: 400, step: 1, default: 24, group: "운전" },
-    { kind: "number", key: "duty", label: "듀티", unit: "%", min: 1, max: 100, step: 1, default: 100, group: "운전", hint: "단시간 통전이면 훨씬 큰 힘을 낼 수 있습니다." },
+    insulationClassParam(),
+    ...environmentParams(),
   ],
   simulate,
 };
 
 function simulate(values: ParamValues): DeviceResult {
+  const environment = readEnvironment(values);
+  const insulationClass = Number(values["insulationClass"]) || 155;
   const core = coreMaterial(str(values, "coreMaterial"));
   const conductor = conductorMaterial(str(values, "conductor"));
   const plungerDiameter = num(values, "plungerDiameter") * 1e-3;
@@ -51,7 +65,8 @@ function simulate(values: ParamValues): DeviceResult {
   const turns = Math.round(num(values, "turns"));
   const awg = Math.round(num(values, "awg"));
   const voltage = num(values, "voltage");
-  const duty = num(values, "duty") / 100;
+  // Duty lives in the environment: it is a condition of use, not of the part.
+  const duty = environment.dutyCycle;
 
   const plungerArea = (Math.PI * plungerDiameter * plungerDiameter) / 4;
   const bobbinId = plungerDiameter * 1.1;
@@ -76,11 +91,11 @@ function simulate(values: ParamValues): DeviceResult {
       tempC,
     });
     const current = voltage / winding.rdc;
-    return current * current * winding.rdc * duty;
+    return current * current * winding.rdc;
   };
 
   const surface = Math.PI * bobbinOd * coilLength + (Math.PI / 2) * bobbinOd * bobbinOd;
-  const thermal = solveThermal(lossAt, surface);
+  const thermal = solveThermal(lossAt, surface, environment);
   const winding = analyzeWinding({
     material: conductor,
     turns,
@@ -192,6 +207,11 @@ function simulate(values: ParamValues): DeviceResult {
     const g = Math.max((gap * 1.5 * i) / 40, 1e-5);
     points.push({ x: g * 1e3, y: forceAt(g) });
   }
+  warnings.push(
+    ...insulationWarnings(values, thermal.temperature),
+    ...applicationWarnings(values, out, saturationRatio),
+  );
+
   const curves: Curve[] = [
     {
       key: "force-stroke",
@@ -203,10 +223,34 @@ function simulate(values: ParamValues): DeviceResult {
     },
   ];
 
+  const runtime: RuntimeSpec = {
+    kind: "rl",
+    // Straight across a supply: as the coil heats, the current sags.
+    drive: "voltage",
+    supply: voltage,
+    resistance20: winding.rdc / (1 + conductor.alphaT * (thermal.temperature - 20)),
+    alphaT: conductor.alphaT,
+    inductance: Math.max((turns * turns * MU0 * plungerArea) / (2 * gap + ironPath), 1e-6),
+    fixedLoss: 0,
+    surface,
+    parts: [
+      windingPart(winding.mass, insulationClass, conductor),
+      corePart(core, plungerArea * (coilLength + gap) * core.density * 2),
+      // Bobbin mass from its actual geometry: a 1 mm wall around the former
+      // plus two flanges. A guessed mass would make its heating rate fiction.
+      bobbinPart(
+        (Math.PI * bobbinId * coilLength * 1e-3 +
+          2 * Math.PI * ((bobbinOd * bobbinOd - bobbinId * bobbinId) / 4) * 1.5e-3) *
+          1400,
+      ),
+    ],
+  };
+
   return {
     metrics: out,
     warnings,
     curves,
+    runtime,
     build: {
       kind: "solenoid",
       bobbinOd: bobbinOd * 1e3,

@@ -39,7 +39,7 @@ export const PRESETS: Record<string, Preset[]> = {
       note: "500kHz · 리츠선으로 표피효과 억제",
       values: {
         coreMaterial: "ferrite-n49",
-        conductor: "litz",
+        conductor: "litz-38-100",
         shape: "toroid",
         od: 25,
         id: 15,
@@ -56,7 +56,7 @@ export const PRESETS: Record<string, Preset[]> = {
       name: "60Hz 리액터",
       note: "규소강판 EI · 공극으로 DC 포화 회피",
       values: {
-        coreMaterial: "silicon-steel-m19",
+        coreMaterial: "steel-m19-035",
         conductor: "copper",
         shape: "ei",
         od: 72,
@@ -76,7 +76,7 @@ export const PRESETS: Record<string, Preset[]> = {
       name: "220V → 24V 100W",
       note: "상용 주파수 EI 적층 변압기",
       values: {
-        coreMaterial: "silicon-steel-m19",
+        coreMaterial: "steel-m19-035",
         conductor: "copper",
         shape: "ei",
         tongue: 32,
@@ -98,7 +98,7 @@ export const PRESETS: Record<string, Preset[]> = {
       note: "100kHz 페라이트 · 구형파 구동",
       values: {
         coreMaterial: "ferrite-n87",
-        conductor: "litz",
+        conductor: "litz-38-100",
         shape: "ei",
         tongue: 20,
         stack: 20,
@@ -119,7 +119,7 @@ export const PRESETS: Record<string, Preset[]> = {
       note: "같은 조건에서 철손만 1/5",
       values: {
         coreMaterial: "amorphous-2605sa1",
-        conductor: "aluminum",
+        conductor: "aluminum-1350",
         shape: "ei",
         tongue: 32,
         stack: 38,
@@ -151,7 +151,7 @@ export const PRESETS: Record<string, Preset[]> = {
         turns: 2200,
         awg: 30,
         voltage: 24,
-        duty: 100,
+        "env.duty": 100,
       },
     },
     {
@@ -168,7 +168,7 @@ export const PRESETS: Record<string, Preset[]> = {
         turns: 1200,
         awg: 26,
         voltage: 48,
-        duty: 10,
+        "env.duty": 10,
       },
     },
   ],
@@ -178,7 +178,7 @@ export const PRESETS: Record<string, Preset[]> = {
       note: "네오디뮴 4극 · 1700rpm",
       values: {
         magnet: "ndfeb-n42",
-        coreMaterial: "silicon-steel-m19",
+        coreMaterial: "steel-m19-035",
         conductor: "copper",
         rotorOd: 40,
         stackLength: 40,
@@ -198,8 +198,8 @@ export const PRESETS: Record<string, Preset[]> = {
       name: "저가 페라이트 자석형",
       note: "같은 크기, 자속이 약해 토크가 1/3",
       values: {
-        magnet: "ferrite-magnet",
-        coreMaterial: "silicon-steel-m19",
+        magnet: "ferrite-magnet-y30",
+        coreMaterial: "steel-m19-035",
         conductor: "copper",
         rotorOd: 40,
         stackLength: 40,
@@ -220,7 +220,7 @@ export const PRESETS: Record<string, Preset[]> = {
       note: "턴수를 줄여 회전수를 올린 설계",
       values: {
         magnet: "ndfeb-n42",
-        coreMaterial: "silicon-steel-m19",
+        coreMaterial: "steel-m19-035",
         conductor: "copper",
         rotorOd: 28,
         stackLength: 25,

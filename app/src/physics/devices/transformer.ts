@@ -3,7 +3,9 @@
 import { coreLossDensity, coreMaterial, conductorMaterial } from "../materials";
 import { coreMetrics, inductanceAtZero } from "../magnetics";
 import { solveThermal } from "../thermal";
+import { environmentParams, readEnvironment } from "../environment";
 import { analyzeWinding } from "../wire";
+import type { RuntimeSpec } from "../run";
 import {
   metric,
   num,
@@ -25,6 +27,12 @@ import {
   thermalWarnings,
   toroidDims,
   windowWarnings,
+  applicationWarnings,
+  bobbinPart,
+  corePart,
+  insulationClassParam,
+  insulationWarnings,
+  windingPart,
 } from "./shared";
 
 export const transformer: DeviceDefinition = {
@@ -33,7 +41,7 @@ export const transformer: DeviceDefinition = {
   tagline: "1차 권선의 자속으로 2차 권선에 전압을 유도합니다",
   icon: "⧉",
   params: [
-    coreMaterialParam("coreMaterial", "silicon-steel-m19"),
+    coreMaterialParam("coreMaterial", "steel-m19-035"),
     conductorParam(),
     {
       kind: "choice",
@@ -68,11 +76,15 @@ export const transformer: DeviceDefinition = {
         { value: "square", label: "구형파", note: "SMPS 브리지 구동" },
       ],
     },
+    insulationClassParam(),
+    ...environmentParams(),
   ],
   simulate,
 };
 
 function simulate(values: ParamValues): DeviceResult {
+  const environment = readEnvironment(values);
+  const insulationClass = Number(values["insulationClass"]) || 155;
   const core = coreMaterial(str(values, "coreMaterial"));
   const conductor = conductorMaterial(str(values, "conductor"));
   const shape = str(values, "shape");
@@ -136,7 +148,7 @@ function simulate(values: ParamValues): DeviceResult {
     return iPri * iPri * rTotal + ironLoss;
   };
 
-  const thermal = solveThermal(lossAt, metrics.surface);
+  const thermal = solveThermal(lossAt, metrics.surface, environment);
   const p = primary(thermal.temperature);
   const s = secondary(thermal.temperature);
   const iSec = pout > 0 ? pout / Math.max(voutIdeal, 1e-6) : 0;
@@ -211,6 +223,11 @@ function simulate(values: ParamValues): DeviceResult {
     });
   }
 
+  warnings.push(
+    ...insulationWarnings(values, thermal.temperature),
+    ...applicationWarnings(values, out, saturationRatio),
+  );
+
   const curves: Curve[] = [];
   if (pout > 0) {
     const points: { x: number; y: number }[] = [];
@@ -260,5 +277,24 @@ function simulate(values: ParamValues): DeviceResult {
           windings,
         });
 
-  return { metrics: out, warnings, curves, build };
+  const runtime: RuntimeSpec = {
+    kind: "rl",
+    // Energised straight onto the line: the magnetising inductance decides the
+    // inrush, and a saturating core is what makes it spectacular.
+    drive: "voltage",
+    supply: vin,
+    resistance20: p.rdc / (1 + conductor.alphaT * (thermal.temperature - 20)),
+    alphaT: conductor.alphaT,
+    inductance: Math.max(lm, 1e-6),
+    fixedLoss: ironLoss,
+    surface: metrics.surface,
+    saturationCurrent: imag * (core.bsat / Math.max(bPeak, 1e-6)),
+    parts: [
+      windingPart(p.mass + s.mass, insulationClass, conductor),
+      corePart(core, metrics.mass),
+      bobbinPart(metrics.mass * 0.04),
+    ],
+  };
+
+  return { metrics: out, warnings, curves, build, runtime };
 }
