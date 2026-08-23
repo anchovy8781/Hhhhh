@@ -8,7 +8,7 @@
  */
 
 import * as THREE from "three";
-import type { PartSpec, RunEvent, RunResult } from "../physics/run";
+import type { FailureMode, PartSpec, RunEvent, RunResult } from "../physics/run";
 import {
   Blast,
   makeDebris,
@@ -46,7 +46,13 @@ function glowFor(temperature: number, limit: number): { colour: THREE.Color; str
 }
 
 export class Timelapse {
-  private readonly meshes: { mesh: THREE.Mesh; role: string; base: THREE.Color }[] = [];
+  private readonly meshes: {
+    mesh: THREE.Mesh;
+    role: string;
+    base: THREE.Color;
+    /** Where the piece sat before anything broke, so a replay starts whole. */
+    home: { position: THREE.Vector3; rotation: THREE.Euler };
+  }[] = [];
   private readonly spinners: THREE.Object3D[] = [];
   private readonly plungers: THREE.Object3D[] = [];
   private readonly effects: { field?: ParticleField; blast?: Blast; object: THREE.Object3D }[] = [];
@@ -60,6 +66,8 @@ export class Timelapse {
   private fired: RunEvent[] = [];
   private lastFrame = 0;
   private frameHandle = 0;
+  /** Once dead, nothing turns and nothing is pulled in any more. */
+  private dead = false;
 
   constructor(
     stage: THREE.Group,
@@ -79,7 +87,15 @@ export class Timelapse {
         const mesh = child as THREE.Mesh;
         const material = mesh.material as THREE.MeshStandardMaterial;
         if (material?.isMeshStandardMaterial) {
-          this.meshes.push({ mesh, role, base: material.color.clone() });
+          this.meshes.push({
+            mesh,
+            role,
+            base: material.color.clone(),
+            home: {
+              position: mesh.position.clone(),
+              rotation: mesh.rotation.clone(),
+            },
+          });
         }
       }
     });
@@ -119,6 +135,7 @@ export class Timelapse {
   reset(): void {
     this.stop();
     this.elapsed = 0;
+    this.dead = false;
     this.firedIds.clear();
     this.fired = [];
     for (const effect of this.effects) {
@@ -131,6 +148,10 @@ export class Timelapse {
       const material = entry.mesh.material as THREE.MeshStandardMaterial;
       material.color.copy(entry.base);
       material.emissive.setRGB(0, 0, 0);
+      material.transparent = false;
+      material.opacity = 1;
+      entry.mesh.position.copy(entry.home.position);
+      entry.mesh.rotation.copy(entry.home.rotation);
     }
   }
 
@@ -176,9 +197,11 @@ export class Timelapse {
     }
 
     // Spin what turns, in real proportion to the computed speed.
-    const rpm = this.run.electrical.at(-1)?.speed
-      ? ((this.run.electrical.at(-1)!.speed ?? 0) * 60) / (2 * Math.PI)
-      : 0;
+    const rpm = this.dead
+      ? 0
+      : this.run.electrical.at(-1)?.speed
+        ? ((this.run.electrical.at(-1)!.speed ?? 0) * 60) / (2 * Math.PI)
+        : 0;
     if (rpm > 0) {
       // Show a legible fraction of the real speed; a 1700 rpm blur says nothing.
       this.angle += dt * Math.min(rpm / 60, 6) * Math.PI * 2;
@@ -186,7 +209,9 @@ export class Timelapse {
     }
 
     // Pull the plunger in as current builds.
-    const pull = Math.min(sample.current / Math.max(this.run.steadyCurrent, 1e-9), 1);
+    const pull = this.dead
+      ? 0
+      : Math.min(sample.current / Math.max(this.run.steadyCurrent, 1e-9), 1);
     for (const plunger of this.plungers) {
       const rest = plunger.userData.restY as number;
       const pulled = plunger.userData.pulledY as number;
@@ -225,6 +250,47 @@ export class Timelapse {
     return box.getCenter(new THREE.Vector3());
   }
 
+  /** Meshes belonging to one part, for breaking or hiding. */
+  private meshesFor(partId: string): THREE.Mesh[] {
+    return this.meshes
+      .filter((entry) =>
+        partId === "winding" ? entry.role === "winding" : entry.role === partId,
+      )
+      .map((entry) => entry.mesh);
+  }
+
+  /**
+   * Break a part apart.
+   *
+   * Cracking nudges the pieces off their seats and darkens the fracture;
+   * shattering throws them clear. Both read instantly as "this is not a part
+   * any more", which a red number does not.
+   */
+  private breakApart(partId: string, violent: boolean): void {
+    for (const mesh of this.meshesFor(partId)) {
+      const spread = this.scale * (violent ? 0.28 : 0.045);
+      mesh.position.x += (Math.random() - 0.5) * spread * 2;
+      mesh.position.y += (Math.random() - 0.5) * spread * 2;
+      mesh.position.z += (Math.random() - 0.5) * spread * 2;
+      mesh.rotation.x += (Math.random() - 0.5) * (violent ? 0.5 : 0.06);
+      mesh.rotation.z += (Math.random() - 0.5) * (violent ? 0.5 : 0.06);
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      material.color.lerp(new THREE.Color(0x1a1512), violent ? 0.5 : 0.25);
+      material.roughness = 1;
+    }
+  }
+
+  /** An open winding or a lost field: the device is simply not running. */
+  private goDead(partId: string): void {
+    this.dead = true;
+    for (const mesh of this.meshesFor(partId)) {
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      material.transparent = true;
+      material.opacity = 0.25;
+      material.emissive.setRGB(0, 0, 0);
+    }
+  }
+
   private spawnEffect(event: RunEvent): void {
     const origin = this.originFor(event.partId);
     const add = (field?: ParticleField, blast?: Blast) => {
@@ -246,15 +312,46 @@ export class Timelapse {
     const part = this.partById.get(event.partId);
     const final = this.run.finalTemperatures[event.partId] ?? 0;
     const overshoot = part ? final / part.limit : 1;
+    const mode: FailureMode = event.mode ?? "burn";
 
-    if (event.partId === "magnet") {
-      // A magnet does not burn; it quietly stops being a magnet.
-      add(makeSmoke(origin, this.scale * 0.6));
-      return;
+    switch (mode) {
+      case "crack":
+        this.breakApart(event.partId, false);
+        add(makeSmoke(origin, this.scale * 0.7));
+        add(makeDebris(origin, this.scale * 0.35));
+        break;
+      case "shatter":
+        this.breakApart(event.partId, true);
+        add(undefined, new Blast(origin, this.scale * 0.7));
+        add(makeDebris(origin, this.scale));
+        add(makeSmoke(origin, this.scale * 0.8));
+        break;
+      case "melt":
+        this.goDead(event.partId);
+        add(makeSmoke(origin, this.scale));
+        add(makeSparks(origin, this.scale * 0.6));
+        break;
+      case "demagnetise":
+        // A magnet does not burn; it quietly stops being a magnet.
+        this.dead = true;
+        add(makeSmoke(origin, this.scale * 0.5));
+        break;
+      case "arc":
+        add(makeSparks(origin, this.scale * 1.4));
+        add(makeSmoke(origin, this.scale));
+        if (overshoot > 1.4) add(makeFire(origin, this.scale));
+        break;
+      case "seize":
+        this.dead = true;
+        add(makeSmoke(origin, this.scale));
+        break;
+      default:
+        add(makeSmoke(origin, this.scale));
+        add(makeFire(origin, this.scale));
+        break;
     }
-    add(makeSmoke(origin, this.scale));
-    add(makeFire(origin, this.scale));
-    if (overshoot > 1.8) {
+
+    if (overshoot > 1.8 && mode !== "shatter") {
       // Far enough past its rating that there would be nothing left.
       add(undefined, new Blast(origin, this.scale));
       add(makeDebris(origin, this.scale));

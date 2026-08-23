@@ -175,6 +175,33 @@ export interface WindingVisual {
   share: number;
 }
 
+/**
+ * One sentence on how the design is doing, in plain language.
+ *
+ * Beginner mode leads with this. Someone who does not yet know what a
+ * saturation ratio is still needs to know whether this thing works.
+ */
+export function plainVerdict(result: DeviceResult): {
+  tone: "good" | "warn" | "bad";
+  text: string;
+} {
+  const errors = result.warnings.filter((w) => w.level === "error");
+  const warns = result.warnings.filter((w) => w.level === "warn");
+  if (errors.length > 0) {
+    return {
+      tone: "bad",
+      text: `이대로는 못 씁니다 — ${errors.length}가지 문제가 있습니다. 아래 빨간 칸을 먼저 보세요.`,
+    };
+  }
+  if (warns.length > 0) {
+    return {
+      tone: "warn",
+      text: `동작은 하지만 여유가 없습니다 — ${warns.length}가지를 확인하세요.`,
+    };
+  }
+  return { tone: "good", text: "설계가 한계 안에 있습니다. 전원을 인가해 확인해 보세요." };
+}
+
 /** Saturation of a build spec, or 0 for devices that have no magnetic core. */
 export function buildSaturation(build: BuildSpec): number {
   return "saturation" in build ? build.saturation : 0;

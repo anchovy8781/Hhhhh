@@ -149,7 +149,7 @@ export function makeSmoke(origin: THREE.Vector3, scale: number): ParticleField {
   return new ParticleField({
     count: 90,
     texture: textures().smoke,
-    size: scale * 0.5,
+    size: scale * 0.38,
     color: 0x8a8a8a,
     additive: false,
     life: 2.6,
@@ -167,7 +167,7 @@ export function makeFire(origin: THREE.Vector3, scale: number): ParticleField {
   return new ParticleField({
     count: 120,
     texture: textures().flame,
-    size: scale * 0.34,
+    size: scale * 0.26,
     color: 0xffa22a,
     additive: true,
     life: 0.75,
@@ -183,14 +183,14 @@ export function makeFire(origin: THREE.Vector3, scale: number): ParticleField {
 
 export function makeSparks(origin: THREE.Vector3, scale: number): ParticleField {
   return new ParticleField({
-    count: 160,
+    count: 130,
     texture: textures().flame,
-    size: scale * 0.12,
+    size: scale * 0.055,
     color: 0xbfe6ff,
     additive: true,
     life: 0.5,
-    speed: scale * 4,
-    spread: scale * 5,
+    speed: scale * 2.2,
+    spread: scale * 2.6,
     buoyancy: 0.1,
     origin: vec(origin),
     radius: scale * 0.15,
@@ -203,12 +203,12 @@ export function makeDebris(origin: THREE.Vector3, scale: number): ParticleField 
   return new ParticleField({
     count: 200,
     texture: textures().smoke,
-    size: scale * 0.22,
+    size: scale * 0.12,
     color: 0x4a4038,
     additive: false,
     life: 2.2,
-    speed: scale * 6,
-    spread: scale * 7,
+    speed: scale * 2.8,
+    spread: scale * 3.2,
     buoyancy: 0.2,
     origin: vec(origin),
     radius: scale * 0.2,
@@ -230,7 +230,7 @@ export class Blast {
     const material = new THREE.MeshBasicMaterial({
       color: 0xffb347,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.5,
       side: THREE.DoubleSide,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
@@ -245,10 +245,12 @@ export class Blast {
   update(dt: number): void {
     this.age += dt;
     const t = Math.min(this.age / 0.85, 1);
-    const radius = this.scale * (0.3 + 3.2 * t);
+    // A blast that swallows the whole viewport hides the very thing it is
+    // reporting on. Keep the front just larger than the device.
+    const radius = this.scale * (0.25 + 1.15 * t);
     this.shell.scale.setScalar(radius);
-    (this.shell.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - t) ** 1.6;
-    this.light.intensity = 40 * (1 - t) ** 2;
+    (this.shell.material as THREE.MeshBasicMaterial).opacity = 0.5 * (1 - t) ** 2.2;
+    this.light.intensity = 25 * (1 - t) ** 2;
   }
 
   get finished(): boolean {

@@ -121,9 +121,11 @@ describe("generated material values stay physical", () => {
 
   it("keeps every conductor's resistivity in a metal's range", () => {
     for (const material of CONDUCTOR_MATERIALS) {
-      expect(material.rho20).toBeGreaterThan(1e-8);
-      expect(material.rho20).toBeLessThan(1e-6);
-      expect(material.melting).toBeGreaterThan(300);
+      expect(material.rho20, material.id).toBeGreaterThan(1e-8);
+      // Resistance alloys (nichrome, manganin) sit at the top of this range;
+      // anything beyond it is not a conductor this engine can model.
+      expect(material.rho20, material.id).toBeLessThan(2e-6);
+      expect(material.melting, material.id).toBeGreaterThan(300);
     }
   });
 

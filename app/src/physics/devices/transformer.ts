@@ -78,6 +78,19 @@ export const transformer: DeviceDefinition = {
     { kind: "number", key: "pf", label: "부하 역률", unit: "", min: 0.3, max: 1, step: 0.01, default: 1, group: "운전", hint: "1이면 순저항 부하. 낮을수록 같은 유효 전력에 더 큰 전류가 흐릅니다.", advanced: true },
     {
       kind: "choice",
+      key: "phases",
+      label: "상 · 결선",
+      group: "운전",
+      default: "single",
+      options: [
+        { value: "single", label: "단상", note: "입력 전압이 곧 권선 전압입니다." },
+        { value: "wye", label: "3상 Y (성형)", note: "권선 전압은 선간 전압의 1/√3. 중성점을 쓸 수 있습니다." },
+        { value: "delta", label: "3상 Δ (삼각)", note: "권선 전압이 선간 전압과 같아 턴수가 √3배 필요합니다." },
+      ],
+      hint: "3상은 같은 철심으로 훨씬 큰 용량을 냅니다. 다리가 3개인 코어를 씁니다.",
+    },
+    {
+      kind: "choice",
       key: "waveform",
       label: "파형",
       group: "운전",
@@ -127,13 +140,15 @@ function recommend(values: ParamValues): Recommendation[] {
   const targetB = core.bsat * 0.8;
   const out: Recommendation[] = [];
 
-  const suggestedNp = turnsForVoltage(vin, freq, metrics.ae, targetB, formFactor);
+  const connection = str(values, "phases");
+  const legVoltage = vin * (connection === "wye" ? 1 / Math.sqrt(3) : 1);
+  const suggestedNp = turnsForVoltage(legVoltage, freq, metrics.ae, targetB, formFactor);
   if (meaningful(np, suggestedNp)) {
     out.push({
       key: "np",
       value: suggestedNp,
       label: `1차 턴수 ${np} → ${suggestedNp}`,
-      reason: `${vin}V·${freq}Hz에서 이 코어(Ae ${(metrics.ae * 1e6).toFixed(0)}mm²)를 ${targetB.toFixed(2)}T로 쓰려면 N = V/(${formFactor}·f·Ae·B) 입니다.`,
+      reason: `${connection === "wye" ? `선간 ${vin}V의 상전압 ${legVoltage.toFixed(0)}V` : `${vin}V`}·${freq}Hz에서 이 코어(Ae ${(metrics.ae * 1e6).toFixed(0)}mm²)를 ${targetB.toFixed(2)}T로 쓰려면 N = V/(${formFactor}·f·Ae·B) 입니다.`,
     });
   }
 
@@ -148,8 +163,10 @@ function recommend(values: ParamValues): Recommendation[] {
     });
   }
 
-  const iPri = apparent / Math.max(vin, 1e-9);
-  const iSec = apparent / Math.max(voutTarget, 1e-9);
+  const legs = connection === "single" ? 1 : 3;
+  const iPri = apparent / legs / Math.max(legVoltage, 1e-9);
+  const iSec =
+    apparent / legs / Math.max(voutTarget * (connection === "wye" ? 1 / Math.sqrt(3) : 1), 1e-9);
   for (const [key, current, label] of [
     ["awgP", iPri, "1차 전선"],
     ["awgS", iSec, "2차 전선"],
@@ -210,6 +227,12 @@ function simulate(values: ParamValues): DeviceResult {
   const apparent = kva * 1000;
   const pout = apparent * powerFactor;
   const square = str(values, "waveform") === "square";
+  const phases = str(values, "phases");
+  const threePhase = phases !== "single";
+  // What the winding itself sees: a wye winding sits across phase voltage,
+  // a delta winding across the full line voltage.
+  const windingRatio = phases === "wye" ? 1 / Math.sqrt(3) : 1;
+  const legs = threePhase ? 3 : 1;
 
   const dims =
     shape === "ei"
@@ -220,8 +243,11 @@ function simulate(values: ParamValues): DeviceResult {
   // Faraday's law: the core flux is set by volts per turn, not by the load.
   // Sine: V = 4.44*f*N*Ae*B. Square wave at 50 % duty: V = 4*f*N*Ae*B.
   const formFactor = square ? 4 : 4.44;
-  const bPeak = vin / (formFactor * freq * np * metrics.ae);
+  const windingVoltage = vin * windingRatio;
+  const bPeak = windingVoltage / (formFactor * freq * np * metrics.ae);
   const ratio = np / ns;
+  // The secondary is wound the same way as the primary, so the connection
+  // factor cancels and the line-to-line ratio is just the turns ratio.
   const voutIdeal = vin / ratio;
 
   const primary = (tempC: number) =>
@@ -254,20 +280,25 @@ function simulate(values: ParamValues): DeviceResult {
     // the load actually demands, including the copper drop it causes.
     const rTotal = p.rac + s.rac * ratio * ratio;
     // Winding heat follows the apparent power: reactive current is still current.
-    const iSec = apparent > 0 ? apparent / Math.max(voutIdeal, 1e-6) : 0;
+    // Three-phase apparent power splits over three legs, and each leg's
+    // current follows its own winding voltage.
+    const perLeg = apparent / legs;
+    const iSec = perLeg > 0 ? perLeg / Math.max(voutIdeal * windingRatio, 1e-6) : 0;
     const iPri = iSec / ratio;
-    return iPri * iPri * rTotal + ironLoss;
+    return legs * (iPri * iPri * rTotal) + ironLoss * legs;
   };
 
   const thermal = solveThermal(lossAt, metrics.surface, environment);
   const p = primary(thermal.temperature);
   const s = secondary(thermal.temperature);
-  const iSec = apparent > 0 ? apparent / Math.max(voutIdeal, 1e-6) : 0;
+  const perLeg = apparent / legs;
+  const iSec = perLeg > 0 ? perLeg / Math.max(voutIdeal * windingRatio, 1e-6) : 0;
   const iPri = iSec / ratio;
-  const copperLoss = iPri * iPri * (p.rac + s.rac * ratio * ratio);
-  const totalLoss = copperLoss + ironLoss;
+  const copperLoss = legs * iPri * iPri * (p.rac + s.rac * ratio * ratio);
+  const ironTotal = ironLoss * legs;
+  const totalLoss = copperLoss + ironTotal;
   const vdrop = iSec * s.rac + iPri * p.rac / ratio;
-  const voutLoaded = Math.max(0, voutIdeal - vdrop);
+  const voutLoaded = Math.max(0, voutIdeal - vdrop / Math.max(windingRatio, 1e-9));
   const regulation = voutIdeal > 0 ? (voutIdeal - voutLoaded) / voutIdeal : 0;
   const efficiency = pout > 0 ? pout / (pout + totalLoss) : 0;
 
@@ -280,7 +311,14 @@ function simulate(values: ParamValues): DeviceResult {
   const out: Metric[] = [
     metric("ratio", "권수비", ratio, `${ratio.toFixed(2)} : 1`, "plain", { headline: true }),
     metric("kva", "용량", apparent, si(apparent, "VA"), "plain", {
-      hint: `유효 전력 ${si(pout, "W")} (역률 ${powerFactor.toFixed(2)})`,
+      hint: `유효 전력 ${si(pout, "W")} (역률 ${powerFactor.toFixed(2)})${threePhase ? " · 3상 합계" : ""}`,
+    }),
+    metric("vwind", "권선 전압", windingVoltage, si(windingVoltage, "V"), "plain", {
+      hint: threePhase
+        ? phases === "wye"
+          ? "Y결선이라 선간 전압의 1/√3이 권선에 걸립니다."
+          : "Δ결선이라 선간 전압이 그대로 권선에 걸립니다."
+        : "단상이므로 입력 전압이 그대로 권선에 걸립니다.",
     }),
     metric("vout", "출력 전압 (부하시)", voutLoaded, `${voutLoaded.toFixed(1)} V`, "plain", {
       headline: true,
@@ -298,7 +336,7 @@ function simulate(values: ParamValues): DeviceResult {
     metric("reg", "전압 변동률", regulation, `${(regulation * 100).toFixed(1)} %`,
       regulation < 0.05 ? "good" : regulation < 0.15 ? "warn" : "bad"),
     metric("pcu", "구리손", copperLoss, si(copperLoss, "W")),
-    metric("pfe", "철손", ironLoss, si(ironLoss, "W"), "plain", {
+    metric("pfe", "철손", ironTotal, si(ironTotal, "W"), "plain", {
       hint: "무부하에서도 계속 소비됩니다.",
     }),
     metric("ipri", "1차 전류", iPri, si(iPri, "A")),
@@ -324,7 +362,7 @@ function simulate(values: ParamValues): DeviceResult {
     ...thermalWarnings(thermal.temperature, core),
   ];
   if (saturationRatio > 1) {
-    const minTurns = Math.ceil(vin / (formFactor * freq * metrics.ae * core.bsat));
+    const minTurns = Math.ceil(windingVoltage / (formFactor * freq * metrics.ae * core.bsat));
     warnings.push({
       level: "error",
       text: `이 전압·주파수에서는 1차 턴수가 최소 ${minTurns}턴 필요합니다. 지금은 ${np}턴입니다.`,

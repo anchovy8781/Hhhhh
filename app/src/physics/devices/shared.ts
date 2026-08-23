@@ -280,11 +280,24 @@ export function windingPart(
     `절연 열등급 ${insulationClass}°C`,
     `에나멜 피막이 탄화되어 층간 단락으로 이어집니다. 도체 자체는 ${conductor.melting}°C까지 견딥니다.`,
     "전선을 굵게 하거나, 절연 등급을 올리거나, 냉각을 강화하세요.",
+    // Past the enamel it arcs; past the copper's melting point it opens, and
+    // an open winding is the end of the device.
+    { mode: "arc", destruction: conductor.melting, vital: false },
   );
 }
 
 /** The core: limited by its own continuous rating, and by the Curie point. */
+/** Ferrite, powder and ceramic cores are brittle; laminated steel is not. */
+function isBrittle(material: CoreMaterial): boolean {
+  return (
+    material.family.includes("페라이트") ||
+    material.family.includes("분말") ||
+    material.family.includes("SMC")
+  );
+}
+
 export function corePart(material: CoreMaterial, mass: number): PartSpec {
+  const brittle = isBrittle(material);
   return part(
     "core",
     "코어",
@@ -294,7 +307,18 @@ export function corePart(material: CoreMaterial, mass: number): PartSpec {
     Math.min(material.maxTemp, material.curie - 20),
     `${material.name} 연속 사용 상한 ${material.maxTemp}°C`,
     `투자율과 포화 자속밀도가 떨어지고, 큐리 온도 ${material.curie}°C에서는 자성을 완전히 잃습니다.`,
-    "손실이 적은 재료로 바꾸거나 코어를 키워 자속밀도를 낮추세요.",
+    brittle
+      ? "취성 재료입니다. 급격한 온도 변화를 피하고, 손실이 적은 재료로 바꾸거나 코어를 키우세요."
+      : "손실이 적은 재료로 바꾸거나 코어를 키워 자속밀도를 낮추세요.",
+    {
+      brittle,
+      // Brittle cores crack; laminated steel loses its interlaminar insulation
+      // and runs away thermally instead.
+      mode: brittle ? "crack" : "burn",
+      // At the Curie point there is no magnetic circuit left at all.
+      destruction: material.curie,
+      vital: true,
+    },
   );
 }
 
@@ -309,6 +333,8 @@ export function bobbinPart(mass: number, maxTemp = 155): PartSpec {
     `보빈 재료 내열 ${maxTemp}°C`,
     "보빈이 변형되면 권선이 풀리고 절연 거리가 무너집니다.",
     "PPS·LCP 같은 고온 등급 보빈으로 바꾸세요.",
+    // Plastic softens, then burns; it is not what stops the device working.
+    { mode: "burn", destruction: maxTemp + 220 },
   );
 }
 
@@ -323,5 +349,7 @@ export function magnetPart(magnet: MagnetMaterial, mass: number): PartSpec {
     `${magnet.name} 사용 상한 ${magnet.maxTemp}°C`,
     "되돌릴 수 없는 감자가 일어나 식어도 토크가 돌아오지 않습니다.",
     "온도 등급이 높은 자석(H·SH·UH)이나 SmCo로 바꾸세요.",
+    // Losing the field is losing the machine.
+    { mode: "demagnetise", vital: true },
   );
 }

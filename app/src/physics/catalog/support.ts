@@ -143,12 +143,20 @@ export const COOLANT_OPTIONS: CoolantOption[] = ([
   ["conduction-chassis", "샤시 전도 냉각", 40, 200, 1.0, "밀폐 항공"],
   ["immersion-2phase", "2상 침지 냉각", 1500, 100, 15, "데이터센터 극한"],
   ["sealed-enclosure", "밀폐 함체 (냉각 없음)", 5, 200, 0.3, "방수 옥외 열악"],
+  ["forced-air-20", "고속 블로워 20 m/s", 190, 200, 2.8, "항공 고출력 소음"],
+  ["oil-spray", "오일 분사 냉각", 400, 150, 7.0, "EV 모터 직접냉각"],
+  ["water-direct", "권선 직접 수냉", 1400, 90, 12, "대형발전기 중공도체"],
+  ["hydrogen", "수소 냉각", 250, 150, 20, "대형 터빈발전기"],
+  ["thermoelectric", "열전 소자 냉각", 600, 80, 9, "정밀 온도제어 계측"],
+  ["cryogenic-ln2", "액체질소 침지", 3000, -196, 30, "초전도 극저온"],
+  ["natural-convection-vertical", "자연 대류 (수직 방열판)", 22, 200, 0.8, "방열판 무동력"],
+  ["forced-air-heatsink", "방열판 + 팬", 95, 200, 1.6, "전력변환기 표준"],
 ] as [string, string, number, number, number, string][]).map(
   ([id, name, h, maxTemp, cost, tags]): CoolantOption => ({
     id,
     name,
     family: "냉각 방식",
-    medium: /water|glycol|cold-plate|oil|ester|silicone|immersion/.test(id)
+    medium: /water|glycol|cold-plate|oil|ester|silicone|immersion|hydrogen|cryogenic|thermoelectric/.test(id)
       ? "liquid"
       : /conduction|heatpipe|sealed/.test(id)
         ? "conduction"

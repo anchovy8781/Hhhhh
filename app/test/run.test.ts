@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEVICES, defaultValues, device } from "../src/physics/index";
 import { DEFAULT_ENVIRONMENT, readEnvironment } from "../src/physics/environment";
-import { formatTime, runDevice } from "../src/physics/run";
+import { FAILURE_LABELS, formatTime, runDevice } from "../src/physics/run";
 import type { ParamValues } from "../src/physics/types";
 
 const energise = (id: string, overrides: ParamValues = {}, duration = 1800) => {
@@ -133,7 +133,7 @@ describe("fault localisation", () => {
       turns: 1800,
       insulationClass: "130",
     });
-    expect(run.verdict).toBe("fail");
+    expect(["fail", "dead"]).toContain(run.verdict);
     const winding = run.events.find(
       (e) => e.partId === "winding" && e.level === "error",
     )!;
@@ -240,5 +240,80 @@ describe("time formatting", () => {
     expect(formatTime(12)).toBe("12.0초");
     expect(formatTime(300)).toBe("5.0분");
     expect(formatTime(7200)).toBe("2.0시간");
+  });
+});
+
+describe("고장 유형", () => {
+  it("cracks a brittle core instead of burning it", () => {
+    const run = energise("inductor", {
+      coreMaterial: "ferrite-n87",
+      idc: 14,
+      awg: 26,
+      turns: 60,
+      "env.ambient": 90,
+    });
+    // Saturation is also reported against the core but is not a destruction,
+    // so look for the event that carries a failure mode.
+    const core = run.events.find((e) => e.partId === "core" && e.mode);
+    expect(core).toBeTruthy();
+    expect(["crack", "shatter"]).toContain(core!.mode);
+    expect(core!.text).toMatch(/취성|깨져/);
+  });
+
+  it("does not crack laminated steel, which is not brittle", () => {
+    const run = energise("inductor", {
+      coreMaterial: "steel-m19-035",
+      shape: "ei",
+      idc: 16,
+      awg: 26,
+      turns: 80,
+      "env.ambient": 90,
+    });
+    const core = run.events.find((e) => e.partId === "core" && e.mode);
+    if (core) expect(["crack", "shatter"]).not.toContain(core.mode);
+  });
+
+  it("arcs a winding before its copper could ever melt", () => {
+    const run = energise("solenoid", {
+      voltage: 40,
+      awg: 28,
+      turns: 1800,
+      insulationClass: "130",
+    });
+    const winding = run.events.find((e) => e.partId === "winding" && e.level === "error");
+    expect(winding!.mode).toBe("arc");
+  });
+
+  it("calls a device dead when a vital part is gone", () => {
+    const run = energise("motor", {
+      magnet: "ndfeb-n42",
+      loadTorque: 0.6,
+      awg: 26,
+      "env.ambient": 70,
+    });
+    expect(run.verdict).toBe("dead");
+    expect(run.modes).toContain("demagnetise");
+  });
+
+  it("leaves a survivable design with no failure modes at all", () => {
+    const run = energise("inductor");
+    expect(run.modes).toEqual([]);
+    expect(run.verdict).toBe("ok");
+  });
+
+  it("labels every mode it can report", () => {
+    const seen = new Set<string>();
+    const designs: [string, Record<string, number | string>][] = [
+      ["solenoid", { voltage: 45, awg: 28, turns: 1800 }],
+      ["motor", { magnet: "ndfeb-n42", loadTorque: 0.6, awg: 26, "env.ambient": 70 }],
+      ["inductor", { coreMaterial: "ferrite-n87", idc: 14, awg: 26, turns: 60, "env.ambient": 90 }],
+    ];
+    for (const [id, overrides] of designs) {
+      for (const mode of energise(id, overrides).modes) seen.add(mode);
+    }
+    expect(seen.size).toBeGreaterThan(2);
+    for (const mode of seen) {
+      expect(FAILURE_LABELS[mode as keyof typeof FAILURE_LABELS]).toBeTruthy();
+    }
   });
 });

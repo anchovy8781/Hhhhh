@@ -18,6 +18,34 @@ import type { Environment } from "./environment";
 
 export type PartId = "winding" | "core" | "magnet" | "insulation" | "bobbin" | "housing";
 
+/**
+ * How a part actually fails.
+ *
+ * "Too hot" is not one failure. Enamel and plastic burn; ferrite and ceramic
+ * are brittle and crack, and crack violently if the heat arrives fast enough;
+ * copper melts and opens the circuit; a magnet quietly stops being a magnet.
+ * They look different, they need different fixes, and only some of them leave
+ * a device that still works at all.
+ */
+export type FailureMode =
+  | "burn"
+  | "crack"
+  | "shatter"
+  | "melt"
+  | "demagnetise"
+  | "arc"
+  | "seize";
+
+export const FAILURE_LABELS: Record<FailureMode, string> = {
+  burn: "연소",
+  crack: "균열",
+  shatter: "파쇄",
+  melt: "용단",
+  demagnetise: "감자",
+  arc: "절연 파괴 · 아크",
+  seize: "작동 불능",
+};
+
 export interface PartSpec {
   id: PartId;
   label: string;
@@ -36,6 +64,17 @@ export interface PartSpec {
   /** What actually goes wrong when the limit is passed. */
   failure: string;
   advice: string;
+  /** Default way this part gives up. */
+  mode: FailureMode;
+  /**
+   * Brittle parts crack rather than burn, and shatter when the heat arrives
+   * faster than the material can expand evenly.
+   */
+  brittle?: boolean;
+  /** Temperature at which the part is destroyed outright [°C]. */
+  destruction?: number;
+  /** True when losing this part stops the device working at all. */
+  vital?: boolean;
 }
 
 /**
@@ -120,13 +159,17 @@ export interface RunEvent {
   title: string;
   text: string;
   advice: string;
+  mode?: FailureMode;
 }
 
 export interface RunResult {
   electrical: ElectricalSample[];
   thermal: ThermalSample[];
   events: RunEvent[];
-  verdict: "ok" | "warn" | "fail";
+  /** `dead` means the device can no longer do its job at all. */
+  verdict: "ok" | "warn" | "fail" | "dead";
+  /** Modes that actually happened, in the order they happened. */
+  modes: FailureMode[];
   peakCurrent: number;
   steadyCurrent: number;
   /** Time to reach 95 % of the final current [s]. */
@@ -165,6 +208,7 @@ export function part(
   limitLabel: string,
   failure: string,
   advice: string,
+  extra: Partial<Pick<PartSpec, "mode" | "brittle" | "destruction" | "vital">> = {},
 ): PartSpec {
   return {
     id,
@@ -175,7 +219,33 @@ export function part(
     limitLabel,
     failure,
     advice,
+    mode: extra.mode ?? "burn",
+    ...extra,
   };
+}
+
+/** Kelvin per second above which a brittle part shatters instead of cracking. */
+const THERMAL_SHOCK_RATE = 3;
+
+/**
+ * Which way this part is going, given how hot it is and how fast it got there.
+ *
+ * A ferrite core that drifts past its rating develops cracks; one that is
+ * slammed with heat comes apart. Copper does not burn at all until it melts,
+ * and then the circuit simply opens.
+ */
+function failureModeFor(
+  spec: PartSpec,
+  temperature: number,
+  rate: number,
+): FailureMode {
+  if (spec.destruction !== undefined && temperature >= spec.destruction) {
+    return spec.brittle ? "shatter" : "melt";
+  }
+  if (spec.brittle) {
+    return rate > THERMAL_SHOCK_RATE ? "shatter" : "crack";
+  }
+  return spec.mode;
 }
 
 /**
@@ -362,8 +432,11 @@ export function runDevice(
   const events: RunEvent[] = [];
   const failed = new Set<string>();
   const warned = new Set<string>();
+  const modes: FailureMode[] = [];
+  const previous: Record<string, number> = { ...temperatures };
   let failedAt: number | undefined;
   let failedPart: PartId | undefined;
+  let inoperable = false;
 
   if (
     spec.kind === "ac" &&
@@ -425,8 +498,13 @@ export function runDevice(
 
     for (const p of spec.parts) {
       const temp = temperatures[p.id]!;
+      const rate = (temp - (previous[p.id] ?? temp)) / Math.max(dt, 1e-9);
+      previous[p.id] = temp;
       if (temp > p.limit && !failed.has(p.id)) {
         failed.add(p.id);
+        const mode = failureModeFor(p, temp, rate);
+        modes.push(mode);
+        if (p.vital || mode === "melt" || mode === "shatter") inoperable = true;
         if (failedAt === undefined) {
           failedAt = t;
           failedPart = p.id;
@@ -435,8 +513,9 @@ export function runDevice(
           t,
           partId: p.id,
           level: "error",
-          title: `${p.label} 한계 초과`,
-          text: `${formatTime(t)}에 ${p.label}이(가) ${temp.toFixed(0)}°C에 도달해 ${p.limitLabel}을(를) 넘었습니다. ${p.failure}`,
+          mode,
+          title: `${p.label} ${FAILURE_LABELS[mode]}`,
+          text: `${formatTime(t)}에 ${p.label}이(가) ${temp.toFixed(0)}°C에 도달해 ${p.limitLabel}을(를) 넘었습니다. ${describeMode(p, mode, rate)}`,
           advice: p.advice,
         });
       } else if (temp > p.limit - 15 && !warned.has(p.id) && !failed.has(p.id)) {
@@ -457,17 +536,20 @@ export function runDevice(
     }
   }
 
-  const verdict = events.some((e) => e.level === "error")
-    ? "fail"
-    : events.length > 0
-      ? "warn"
-      : "ok";
+  const verdict: RunResult["verdict"] = inoperable
+    ? "dead"
+    : events.some((e) => e.level === "error")
+      ? "fail"
+      : events.length > 0
+        ? "warn"
+        : "ok";
 
   return {
     electrical: electrical.samples,
     thermal: samples,
     events: events.sort((a, b) => a.t - b.t),
     verdict,
+    modes,
     peakCurrent: electrical.peak,
     steadyCurrent: electrical.steady,
     currentRise: electrical.rise,
@@ -476,6 +558,26 @@ export function runDevice(
     finalTemperatures: { ...temperatures },
     duration,
   };
+}
+
+/** One sentence on what this particular ending looks like. */
+function describeMode(spec: PartSpec, mode: FailureMode, rate: number): string {
+  switch (mode) {
+    case "crack":
+      return `${spec.label}은(는) 취성 재료입니다. 열팽창 차이로 균열이 생기고, 자로가 끊어지면서 인덕턴스가 무너집니다.`;
+    case "shatter":
+      return `열이 초당 ${rate.toFixed(1)}K씩 올라 재료가 균일하게 팽창하지 못했습니다. 조각으로 깨져 나갑니다.`;
+    case "melt":
+      return `도체가 녹아 끊어집니다. 회로가 열리면서 기기는 그 자리에서 멈춥니다.`;
+    case "demagnetise":
+      return `되돌릴 수 없는 감자가 일어납니다. 식어도 자속이 돌아오지 않아 출력이 영구히 줄어듭니다.`;
+    case "arc":
+      return `절연이 무너져 층간 아크가 발생합니다. 단락 전류가 흐르며 권선이 그 자리에서 탄화됩니다.`;
+    case "seize":
+      return `${spec.failure}`;
+    default:
+      return spec.failure;
+  }
 }
 
 export function formatTime(seconds: number): string {

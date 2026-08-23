@@ -18,6 +18,7 @@ import { motor } from "./devices/motor";
 import { busbar } from "./devices/busbar";
 import { cmChoke } from "./devices/cmchoke";
 import { bldc } from "./devices/bldc";
+import { inductionMotor } from "./devices/induction";
 import type { DeviceDefinition, ParamValues } from "./types";
 
 export const DEVICES: DeviceDefinition[] = [
@@ -27,6 +28,7 @@ export const DEVICES: DeviceDefinition[] = [
   solenoid,
   motor,
   bldc,
+  inductionMotor,
   busbar,
 ];
 

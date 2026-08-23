@@ -1,8 +1,24 @@
-/** Minimal 2-D line chart on a canvas -- no dependency, readable on a phone. */
+/**
+ * Minimal 2-D line chart on a canvas -- no dependency, readable on a phone.
+ *
+ * The axis captions get their own rows rather than being tucked into the
+ * corners of the plot: at phone width a caption sitting beside the topmost
+ * tick label simply lands on top of it.
+ */
 
 import type { Curve } from "../physics/types";
 
-const PADDING = { top: 10, right: 12, bottom: 26, left: 46 };
+/** Height reserved for the caption above the plot, and for the one below. */
+const CAPTION_ROW = 14;
+const TICK_ROW = 13;
+const PADDING = { top: 6, right: 14, bottom: 4, left: 8 };
+
+const COLOURS = {
+  grid: "#2a323d",
+  text: "#8b96a5",
+  line: "#38bdf8",
+  marker: "#d29922",
+};
 
 export function drawCurve(canvas: HTMLCanvasElement, curve: Curve): void {
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
@@ -14,6 +30,7 @@ export function drawCurve(canvas: HTMLCanvasElement, curve: Curve): void {
   if (!ctx) return;
   ctx.scale(ratio, ratio);
   ctx.clearRect(0, 0, width, height);
+  ctx.font = "10px system-ui, sans-serif";
 
   const points = curve.points.filter((p) => isFinite(p.x) && isFinite(p.y));
   if (points.length < 2) return;
@@ -27,53 +44,69 @@ export function drawCurve(canvas: HTMLCanvasElement, curve: Curve): void {
   const xSpan = xMax - xMin || 1;
   const ySpan = yMax - yMin || 1;
 
-  const plotW = width - PADDING.left - PADDING.right;
-  const plotH = height - PADDING.top - PADDING.bottom;
-  const toX = (x: number) => PADDING.left + ((x - xMin) / xSpan) * plotW;
-  const toY = (y: number) => PADDING.top + plotH - ((y - yMin) / ySpan) * plotH;
+  // Reserve exactly the width the widest y tick label needs, so the numbers
+  // never run into the plot and the plot never wastes space on short ones.
+  const tickLabels = [0, 1, 2, 3].map((i) => format(yMax - (ySpan * i) / 3));
+  const gutter = Math.ceil(Math.max(...tickLabels.map((t) => ctx.measureText(t).width))) + 8;
 
-  // Grid and axis labels.
-  ctx.strokeStyle = "#2a323d";
-  ctx.fillStyle = "#8b96a5";
+  const plotLeft = PADDING.left + gutter;
+  const plotTop = PADDING.top + CAPTION_ROW;
+  const plotW = width - plotLeft - PADDING.right;
+  const plotH = height - plotTop - TICK_ROW - CAPTION_ROW - PADDING.bottom;
+  if (plotW <= 10 || plotH <= 10) return;
+
+  const toX = (x: number) => plotLeft + ((x - xMin) / xSpan) * plotW;
+  const toY = (y: number) => plotTop + plotH - ((y - yMin) / ySpan) * plotH;
+
+  // Captions, each on its own line.
+  ctx.fillStyle = COLOURS.text;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(curve.yLabel, PADDING.left, PADDING.top);
+  ctx.textAlign = "center";
+  ctx.fillText(curve.xLabel, plotLeft + plotW / 2, height - CAPTION_ROW);
+
+  // Horizontal grid with its tick labels in the gutter.
+  ctx.strokeStyle = COLOURS.grid;
   ctx.lineWidth = 1;
-  ctx.font = "10px system-ui, sans-serif";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
-  for (let i = 0; i <= 3; i++) {
-    const y = PADDING.top + (plotH * i) / 3;
+  tickLabels.forEach((label, i) => {
+    const y = plotTop + (plotH * i) / 3;
     ctx.beginPath();
-    ctx.moveTo(PADDING.left, y);
-    ctx.lineTo(width - PADDING.right, y);
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotLeft + plotW, y);
     ctx.stroke();
-    ctx.fillText(format(yMax - (ySpan * i) / 3), PADDING.left - 6, y);
-  }
-  ctx.textAlign = "center";
-  ctx.textBaseline = "top";
-  for (let i = 0; i <= 2; i++) {
-    const value = xMin + (xSpan * i) / 2;
-    ctx.fillText(format(value), toX(value), height - PADDING.bottom + 6);
-  }
+    ctx.fillText(label, plotLeft - 6, y);
+  });
 
-  // Axis captions.
-  ctx.textAlign = "left";
-  ctx.fillText(curve.yLabel, 2, 1);
-  ctx.textAlign = "right";
-  ctx.fillText(curve.xLabel, width - 4, height - 12);
+  // X ticks, pulled in at the ends so they cannot overflow the canvas.
+  ctx.textBaseline = "top";
+  const tickY = plotTop + plotH + 3;
+  [0, 0.5, 1].forEach((fraction, index) => {
+    const value = xMin + xSpan * fraction;
+    ctx.textAlign = index === 0 ? "left" : index === 2 ? "right" : "center";
+    ctx.fillText(format(value), toX(value), tickY);
+  });
 
   // Operating-point marker.
   if (curve.marker && curve.marker.x >= xMin && curve.marker.x <= xMax) {
     const x = toX(curve.marker.x);
-    ctx.strokeStyle = "#d29922";
+    ctx.strokeStyle = COLOURS.marker;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
-    ctx.moveTo(x, PADDING.top);
-    ctx.lineTo(x, PADDING.top + plotH);
+    ctx.moveTo(x, plotTop);
+    ctx.lineTo(x, plotTop + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  // The curve itself.
-  ctx.strokeStyle = "#38bdf8";
+  // The curve itself, clipped so a spike cannot draw over the captions.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotLeft, plotTop - 1, plotW, plotH + 2);
+  ctx.clip();
+  ctx.strokeStyle = COLOURS.line;
   ctx.lineWidth = 2;
   ctx.lineJoin = "round";
   ctx.beginPath();
@@ -84,6 +117,7 @@ export function drawCurve(canvas: HTMLCanvasElement, curve: Curve): void {
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
+  ctx.restore();
 }
 
 function format(value: number): string {

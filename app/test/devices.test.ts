@@ -449,3 +449,122 @@ describe("인덕터 코어 형상", () => {
     expect(get(slender.metrics, "mue")).toBeGreaterThan(get(stubby.metrics, "mue") * 2);
   });
 });
+
+describe("유도전동기", () => {
+  it("runs near synchronous speed at light load", () => {
+    const result = run("induction");
+    const sync = get(result.metrics, "sync");
+    const speed = get(result.metrics, "speed");
+    expect(speed).toBeGreaterThan(sync * 0.94);
+    expect(speed).toBeLessThan(sync);
+  });
+
+  it("sets synchronous speed from poles and frequency alone", () => {
+    const four = run("induction", { poles: 4, freq: 60 });
+    const two = run("induction", { poles: 2, freq: 60 });
+    expect(get(four.metrics, "sync")).toBeCloseTo(1800, 0);
+    expect(get(two.metrics, "sync")).toBeCloseTo(3600, 0);
+  });
+
+  it("slips further under more load", () => {
+    const light = run("induction", { loadTorque: 3 });
+    const heavy = run("induction", { loadTorque: 14 });
+    expect(get(heavy.metrics, "slip")).toBeGreaterThan(get(light.metrics, "slip"));
+    expect(get(heavy.metrics, "speed")).toBeLessThan(get(light.metrics, "speed"));
+  });
+
+  it("keeps the power factor honest by counting magnetising current", () => {
+    const result = run("induction");
+    expect(get(result.metrics, "imag")).toBeGreaterThan(0);
+    expect(get(result.metrics, "current")).toBeGreaterThan(get(result.metrics, "imag"));
+    // A real induction motor is nowhere near unity, and this one should not be.
+    expect(get(result.metrics, "pf")).toBeLessThan(0.95);
+    expect(get(result.metrics, "pf")).toBeGreaterThan(0.5);
+  });
+
+  it("worsens the power factor as the air gap opens", () => {
+    const tight = run("induction", { airGap: 0.25 });
+    const loose = run("induction", { airGap: 1.2 });
+    expect(get(loose.metrics, "imag")).toBeGreaterThan(get(tight.metrics, "imag"));
+    expect(get(loose.metrics, "pf")).toBeLessThan(get(tight.metrics, "pf"));
+  });
+
+  it("starts, because the deep-bar effect raises rotor resistance at standstill", () => {
+    const shallow = run("induction", { barAspect: 1 });
+    const deep = run("induction", { barAspect: 14 });
+    expect(get(deep.metrics, "startT")).toBeGreaterThan(get(shallow.metrics, "startT"));
+    // Rated torque is the default 8 N.m, and a cage should beat that at rest.
+    expect(get(deep.metrics, "startT")).toBeGreaterThan(8);
+  });
+
+  it("refuses to turn when the load exceeds breakdown torque", () => {
+    const result = run("induction", { loadTorque: 500 });
+    expect(get(result.metrics, "speed")).toBe(0);
+    expect(result.warnings.some((w) => w.level === "error")).toBe(true);
+  });
+
+  it("charges rotor copper loss in proportion to slip", () => {
+    const light = run("induction", { loadTorque: 3 });
+    const heavy = run("induction", { loadTorque: 14 });
+    expect(get(heavy.metrics, "prot")).toBeGreaterThan(get(light.metrics, "prot"));
+  });
+
+  it("grows windage with the cube of speed", () => {
+    const slow = run("induction", { poles: 12, loadTorque: 3 });
+    const fast = run("induction", { poles: 2, loadTorque: 3 });
+    expect(get(fast.metrics, "pfw")).toBeGreaterThan(get(slow.metrics, "pfw") * 5);
+  });
+
+  it("plots torque against speed across the whole slip range", () => {
+    const result = run("induction");
+    const curve = result.curves[0]!;
+    const peak = Math.max(...curve.points.map((p) => p.y));
+    expect(peak).toBeGreaterThan(get(result.metrics, "startT"));
+    expect(peak).toBeCloseTo(get(result.metrics, "maxT"), 0);
+  });
+});
+
+describe("3상 변압기 결선", () => {
+  it("puts line voltage across a delta winding and 1/√3 across a wye one", () => {
+    const single = run("transformer", { phases: "single", vin: 380 });
+    const wye = run("transformer", { phases: "wye", vin: 380 });
+    const delta = run("transformer", { phases: "delta", vin: 380 });
+    expect(get(single.metrics, "vwind")).toBeCloseTo(380, 0);
+    expect(get(delta.metrics, "vwind")).toBeCloseTo(380, 0);
+    expect(get(wye.metrics, "vwind")).toBeCloseTo(380 / Math.sqrt(3), 0);
+  });
+
+  it("lets a wye winding run at a third less flux for the same turns", () => {
+    const delta = run("transformer", { phases: "delta", vin: 380 });
+    const wye = run("transformer", { phases: "wye", vin: 380 });
+    expect(get(wye.metrics, "bpeak")).toBeCloseTo(
+      get(delta.metrics, "bpeak") / Math.sqrt(3),
+      3,
+    );
+  });
+
+  it("spreads the same kVA over three legs", () => {
+    const single = run("transformer", { phases: "single", kva: 0.3 });
+    const three = run("transformer", { phases: "wye", kva: 0.3 });
+    // A third of the power per leg, at a lower winding voltage: less current
+    // per winding than the single-phase machine carries.
+    expect(get(three.metrics, "ipri")).toBeLessThan(get(single.metrics, "ipri"));
+  });
+
+  it("recommends the turns a wye connection actually needs", () => {
+    const definition = device("transformer");
+    // A voltage far from the current design, so a turns change is warranted.
+    const values = { ...defaultValues(definition), phases: "wye", vin: 6600 };
+    const suggestion = definition.recommend!(values).find((s) => s.key === "np");
+    expect(suggestion).toBeTruthy();
+    expect(suggestion!.reason).toContain("상전압");
+    // Wye needs 1/root-3 of the turns a delta winding would at the same line volts.
+    const delta = definition
+      .recommend!({ ...values, phases: "delta" })
+      .find((s) => s.key === "np")!;
+    expect((delta.value as number) / (suggestion!.value as number)).toBeCloseTo(
+      Math.sqrt(3),
+      1,
+    );
+  });
+});

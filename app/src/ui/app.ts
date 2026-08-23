@@ -17,12 +17,21 @@ import {
 } from "../physics/catalog/index";
 import { applicationValues } from "../physics/applications";
 import { readEnvironment } from "../physics/environment";
-import { formatTime, runDevice, type RunResult } from "../physics/run";
+import { FAILURE_LABELS, formatTime, runDevice, type RunResult } from "../physics/run";
+import { plainVerdict } from "../physics/types";
 import { buildDevice, type BuiltDevice } from "../view3d/builders";
 import { Timelapse } from "../view3d/timelapse";
 import { clearGroup, createViewer, type Viewer } from "../view3d/scene";
 import { drawCurve } from "./chart";
 import { PRESETS } from "./presets";
+import {
+  SLOT_COUNT,
+  clearSlot,
+  describeSlot,
+  listSlots,
+  mergeSlot,
+  saveSlot,
+} from "./storage";
 
 const GROUPS: ParamGroup[] = ["재료", "치수", "권선", "운전", "환경"];
 
@@ -115,6 +124,7 @@ export function startApp(): void {
     renderGroupTabs();
     renderControls();
     renderPresets();
+    renderSlots();
     update(true);
   }
 
@@ -461,6 +471,77 @@ export function startApp(): void {
     }
   }
 
+  /**
+   * Eight save slots.
+   *
+   * A design is worth keeping the moment it works, and losing it to a tab
+   * refresh is the fastest way to stop trusting a tool.
+   */
+  function renderSlots() {
+    const host = el("slots");
+    host.replaceChildren();
+    const slots = listSlots();
+    for (let index = 0; index < SLOT_COUNT; index++) {
+      const slot = slots[index];
+      const row = document.createElement("div");
+      row.className = slot ? "slot" : "slot empty";
+
+      const body = document.createElement("button");
+      body.type = "button";
+      body.className = "slot-body";
+      if (slot) {
+        const definition = DEVICES.find((d) => d.id === slot.deviceId);
+        body.innerHTML =
+          `${slot.name}<small>${definition?.name ?? slot.deviceId} · ${describeSlot(slot)}</small>`;
+        body.addEventListener("click", () => {
+          const target = DEVICES.find((d) => d.id === slot.deviceId);
+          if (!target) return;
+          current = target;
+          values = mergeSlot(defaultValues(target), slot.values);
+          activeGroup = "재료";
+          el("tagline").textContent = target.tagline;
+          renderDeviceTabs();
+          renderGroupTabs();
+          renderControls();
+          renderPresets();
+          update(true);
+        });
+      } else {
+        body.innerHTML = `슬롯 ${index + 1}<small>비어 있음</small>`;
+        body.disabled = true;
+      }
+      row.append(body);
+
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "slot-action save";
+      save.textContent = slot ? "덮어쓰기" : "저장";
+      save.addEventListener("click", () => {
+        const suggested = slot?.name ?? `${current.name} ${index + 1}`;
+        const name = window.prompt("설계 이름", suggested);
+        if (name === null) return;
+        if (!saveSlot(index, name.trim() || suggested, current.id, values)) {
+          window.alert("저장할 수 없습니다. 브라우저의 저장 공간이 막혀 있는지 확인하세요.");
+        }
+        renderSlots();
+      });
+      row.append(save);
+
+      if (slot) {
+        const erase = document.createElement("button");
+        erase.type = "button";
+        erase.className = "slot-action erase";
+        erase.textContent = "삭제";
+        erase.addEventListener("click", () => {
+          clearSlot(index);
+          renderSlots();
+        });
+        row.append(erase);
+      }
+      host.append(row);
+    }
+  }
+
   function renderPresets() {
     const host = el("presets");
     host.replaceChildren();
@@ -493,6 +574,7 @@ export function startApp(): void {
       button.textContent = "⚡ 전원 인가하고 돌려보기";
       el("run-report").hidden = true;
     }
+    renderPlainVerdict(result);
     renderHeadline(result);
     renderAdvice();
     renderWarnings(result);
@@ -574,6 +656,18 @@ export function startApp(): void {
       add(`${winding.label} ${winding.turns}T · ⌀${winding.wireDiameter.toFixed(2)}mm`);
     }
     if (abbreviated) add("권선은 일부만 표시");
+  }
+
+  function renderPlainVerdict(result: DeviceResult) {
+    const host = el("verdict");
+    if (!beginner) {
+      host.hidden = true;
+      return;
+    }
+    const summary = plainVerdict(result);
+    host.hidden = false;
+    host.className = `plain-verdict ${summary.tone}`;
+    host.textContent = summary.text;
   }
 
   function renderHeadline(result: DeviceResult) {
@@ -683,7 +777,9 @@ export function startApp(): void {
         ? `⚡ ${formatTime(run.duration)} 연속 운전 통과 — 다시 돌려보기`
         : run.verdict === "warn"
           ? "⚠ 한계에 근접했습니다 — 아래 확인"
-          : "⛔ 운전 중 고장 — 아래 확인";
+          : run.verdict === "dead"
+            ? "💀 작동 불능 — 아래 확인"
+            : "⛔ 운전 중 고장 — 아래 확인";
   }
 
   function renderRun(run: RunResult, result: DeviceResult) {
@@ -694,12 +790,17 @@ export function startApp(): void {
     const verdict = document.createElement("div");
     verdict.className = `run-verdict ${run.verdict}`;
     const span = formatTime(run.duration);
+    const modeText = run.modes.length
+      ? ` (${[...new Set(run.modes)].map((m) => FAILURE_LABELS[m]).join(" · ")})`
+      : "";
     verdict.textContent =
-      run.verdict === "fail"
-        ? `${formatTime(run.failedAt ?? 0)} 만에 ${PART_LABELS[run.failedPart ?? ""] ?? "부품"}이(가) 고장났습니다`
-        : run.verdict === "warn"
-          ? `${span} 운전은 버텼지만 여유가 없습니다`
-          : `${span} 연속 운전, 이상 없음`;
+      run.verdict === "dead"
+        ? `${formatTime(run.failedAt ?? 0)} 만에 작동 불능 — ${PART_LABELS[run.failedPart ?? ""] ?? "부품"}${modeText}`
+        : run.verdict === "fail"
+          ? `${formatTime(run.failedAt ?? 0)} 만에 ${PART_LABELS[run.failedPart ?? ""] ?? "부품"}이(가) 고장났습니다${modeText}`
+          : run.verdict === "warn"
+            ? `${span} 운전은 버텼지만 여유가 없습니다`
+            : `${span} 연속 운전, 이상 없음`;
     report.append(verdict);
 
     const stats = document.createElement("div");
@@ -801,6 +902,23 @@ export function startApp(): void {
       renderControls();
     },
     controlCount: () => document.querySelectorAll(".control").length,
+    saveTo: (index: number, name: string) => {
+      const ok = saveSlot(index, name, current.id, values);
+      renderSlots();
+      return ok;
+    },
+    loadFrom: (index: number) => {
+      const slot = listSlots()[index];
+      if (!slot) return false;
+      const target = DEVICES.find((d) => d.id === slot.deviceId);
+      if (!target) return false;
+      current = target;
+      values = mergeSlot(defaultValues(target), slot.values);
+      renderControls();
+      update(true);
+      return true;
+    },
+    slots: () => listSlots(),
     search: (query: string, kind: string) =>
       searchCatalog(query, { kind: kind as CatalogKind, limit: 20 }).map((i) => i.id),
     timelapseState: () => {

@@ -211,8 +211,8 @@ try {
     failures.push(`과부하 설계인데 고장을 알리지 않았습니다: ${reportText.slice(0, 80)}`);
   }
   const verdictState = await page.locator("#energise").getAttribute("data-state");
-  if (verdictState !== "fail") {
-    failures.push(`과부하 설계의 판정이 fail이 아닙니다 (${verdictState})`);
+  if (!["fail", "dead"].includes(verdictState)) {
+    failures.push(`과부하 설계의 판정이 고장이 아닙니다 (${verdictState})`);
   }
   // The timelapse must actually play and set the thing on fire.
   await wait(2500);
@@ -301,6 +301,38 @@ try {
     if (!drawn.ok) failures.push(`${shape} 코어가 그려지지 않았습니다 (${drawn.reason})`);
     await page.screenshot({ path: `${OUT}/shape-${shape}.png` });
   }
+
+  // Design slots must save, list and reload.
+  await page.evaluate(() => {
+    window.__lab.setDevice("inductor");
+    window.__lab.setValue("turns", 77);
+  });
+  await wait(400);
+  const saved = await page.evaluate(() => window.__lab.saveTo(0, "테스트 설계"));
+  if (!saved) failures.push("설계를 슬롯에 저장하지 못했습니다");
+  await page.evaluate(() => {
+    window.__lab.setDevice("motor");
+  });
+  await wait(400);
+  const reloaded = await page.evaluate(() => {
+    window.__lab.loadFrom(0);
+    return window.__lab.result().metrics.length > 0;
+  });
+  if (!reloaded) failures.push("슬롯에서 설계를 불러오지 못했습니다");
+  const slotName = await page.evaluate(() => window.__lab.slots()[0]?.name);
+  if (slotName !== "테스트 설계") {
+    failures.push(`슬롯 이름이 저장되지 않았습니다 (${slotName})`);
+  }
+
+  // The new device must be reachable and produce a design.
+  await page.evaluate(() => window.__lab.setDevice("induction"));
+  await wait(700);
+  const inductionOk = await page.evaluate(() => {
+    const r = window.__lab.result();
+    return r.metrics.some((m) => m.key === "slip") && r.metrics.every((m) => isFinite(m.raw));
+  });
+  if (!inductionOk) failures.push("유도전동기가 계산되지 않았습니다");
+  await page.screenshot({ path: `${OUT}/induction.png` });
 
   // Desktop layout.
   await page.setViewportSize({ width: 1280, height: 800 });
