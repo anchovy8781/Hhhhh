@@ -26,7 +26,7 @@ export const busbar: DeviceDefinition = {
   tagline: "대전류를 나르는 도체. 굵기와 방열이 곧 통전 용량입니다",
   icon: "▤",
   params: [
-    conductorParam(),
+    conductorParam("conductor", "도체 재료"),
     {
       kind: "choice",
       key: "finish",

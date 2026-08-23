@@ -20,10 +20,13 @@ export const coreMaterialParam = (
   hint: "투자율이 높으면 적은 턴수로 큰 인덕턴스를 얻지만, 포화 자속밀도와 손실이 함께 따라옵니다.",
 });
 
-export const conductorParam = (key = "conductor"): CatalogParam => ({
+export const conductorParam = (
+  key = "conductor",
+  label = "권선 재료",
+): CatalogParam => ({
   kind: "catalog",
   key,
-  label: "권선 재료",
+  label,
   catalog: "conductor",
   group: "재료",
   default: "copper",
