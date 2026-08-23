@@ -257,30 +257,33 @@ function buildEi(spec: Extract<BuildSpec, { kind: "ei" }>): BuiltDevice {
     group.add(marker);
   }
 
+  // Windings on an EI core are concentric: the secondary goes *over* the
+  // primary on the same centre leg, each layer taking a share of the window
+  // width. Stacking them vertically instead would misrepresent both the
+  // coupling and how much window each one really costs.
   let abbreviated = false;
-  let offset = 0;
+  let inset = 0;
   for (const winding of spec.windings) {
     const turns = drawnTurns(winding.turns);
     if (turns < winding.turns) abbreviated = true;
-    const share = Math.max(0.15, winding.share);
-    const inset = winding.wireDiameter * 0.8 + offset;
+    const build = Math.max(
+      windowWidth * 0.8 * Math.max(winding.share, 0.12),
+      winding.wireDiameter,
+    );
+    const height = windowHeight * 0.88;
     const curve = racetrackHelix(
-      tongue / 2 + inset,
-      stack / 2 + inset,
-      windowHeight * 0.92 * share,
+      tongue / 2 + inset + build / 2,
+      stack / 2 + inset + build / 2,
+      height,
       turns,
     );
-    const coil = new THREE.Mesh(
-      tube(
-        curve,
-        displayWireRadius(winding.wireDiameter, windowHeight * 0.92 * share, turns),
-        turns * TUBE_SEGMENTS_PER_TURN,
+    group.add(
+      new THREE.Mesh(
+        tube(curve, displayWireRadius(winding.wireDiameter, height, turns), turns * TUBE_SEGMENTS_PER_TURN),
+        wireSurface(winding.color),
       ),
-      wireSurface(winding.color),
     );
-    coil.position.y = -windowHeight * 0.46 + windowHeight * 0.92 * (offset > 0 ? 0.5 : share / 2);
-    group.add(coil);
-    offset += winding.wireDiameter * 1.6;
+    inset += build;
   }
 
   return {

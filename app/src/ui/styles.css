@@ -132,6 +132,8 @@ body {
   position: absolute;
   top: 10px;
   left: 10px;
+  /* Leave room for the cutaway button so badges wrap instead of sliding under it. */
+  right: 108px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
